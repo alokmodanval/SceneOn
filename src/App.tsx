@@ -75,6 +75,18 @@ export function App() {
           });
         }
       }
+
+      // Check direct voice room deep link ?room=ROOM_ID
+      const targetRoomId = params.get('room');
+      if (targetRoomId) {
+        const targetRoom = fetchedRooms.find((r) => r.id === targetRoomId);
+        if (targetRoom) {
+          const pinParam = params.get('pin');
+          if (!targetRoom.is_private || targetRoom.room_pin === pinParam) {
+            setActiveRoom(targetRoom);
+          }
+        }
+      }
     }
 
     loadData();

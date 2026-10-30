@@ -32,6 +32,16 @@ export interface SceneUser {
 
 export type VoiceFilterMode = 'natural' | 'deep' | 'helium' | 'radio';
 
+export type DjSoundType = 'airhorn' | 'applause' | 'laugh' | 'drumroll' | 'crickets' | 'tadaa';
+
+export interface RoomChatMessage {
+  id: string;
+  sender_id: string;
+  sender_alias: string;
+  text: string;
+  created_at: string;
+}
+
 export interface RoomParticipant {
   id: string;
   alias: string;
@@ -40,6 +50,9 @@ export interface RoomParticipant {
   is_speaking: boolean;
   voice_filter: VoiceFilterMode;
   joined_at: string;
+  role?: 'host' | 'speaker' | 'listener';
+  seat_number?: number; // 1 to 6 (Seat 1 is Host)
+  hand_raised?: boolean;
 }
 
 export interface SceneRoom {
@@ -47,10 +60,14 @@ export interface SceneRoom {
   title: string;
   vibe_tag: string;
   participants: RoomParticipant[];
-  max_users: number;
+  max_users: number; // default 6
   active_topic: string;
   kick_votes: Record<string, string[]>; // targetId -> array of voterIds
   created_at: string;
+  is_private?: boolean;
+  room_pin?: string; // 4-digit code e.g. "1234"
+  host_id?: string;
+  locked_seats?: number[]; // array of locked seat numbers e.g. [3, 4]
 }
 
 export interface SceneChat {

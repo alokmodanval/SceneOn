@@ -108,6 +108,179 @@ export function playUiSound(type: 'click' | 'pop' | 'unlock' | 'kick' | 'reactio
   }
 }
 
+// ----------------- SOUNDBOARD DJ EFFECTS -----------------
+export function playDjSound(type: 'airhorn' | 'applause' | 'laugh' | 'drumroll' | 'crickets' | 'tadaa') {
+  try {
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+    const now = ctx.currentTime;
+
+    if (type === 'airhorn') {
+      const blasts = [0, 0.15, 0.3];
+      blasts.forEach((offset) => {
+        const osc1 = ctx.createOscillator();
+        const osc2 = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const filter = ctx.createBiquadFilter();
+
+        osc1.type = 'sawtooth';
+        osc2.type = 'sawtooth';
+
+        osc1.frequency.setValueAtTime(587.33, now + offset);
+        osc1.frequency.exponentialRampToValueAtTime(560, now + offset + 0.13);
+
+        osc2.frequency.setValueAtTime(440, now + offset);
+        osc2.frequency.exponentialRampToValueAtTime(420, now + offset + 0.13);
+
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(2800, now + offset);
+
+        gain.gain.setValueAtTime(0.2, now + offset);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.13);
+
+        osc1.connect(filter);
+        osc2.connect(filter);
+        filter.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc1.start(now + offset);
+        osc2.start(now + offset);
+        osc1.stop(now + offset + 0.13);
+        osc2.stop(now + offset + 0.13);
+      });
+    } else if (type === 'applause') {
+      const bufferSize = ctx.sampleRate * 2;
+      const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = noiseBuffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        data[i] = (Math.random() * 2 - 1) * (Math.random() > 0.985 ? 0.8 : 0.12);
+      }
+      const noise = ctx.createBufferSource();
+      noise.buffer = noiseBuffer;
+
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.setValueAtTime(1800, now);
+      filter.Q.setValueAtTime(0.8, now);
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.01, now);
+      gain.gain.linearRampToValueAtTime(0.22, now + 0.25);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 2.0);
+
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.connect(ctx.destination);
+      noise.start(now);
+      noise.stop(now + 2.0);
+    } else if (type === 'laugh') {
+      for (let i = 0; i < 6; i++) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        const start = now + i * 0.13;
+        const baseFreq = 420 - i * 15;
+        osc.frequency.setValueAtTime(baseFreq, start);
+        osc.frequency.exponentialRampToValueAtTime(baseFreq * 0.7, start + 0.11);
+
+        gain.gain.setValueAtTime(0.16, start);
+        gain.gain.exponentialRampToValueAtTime(0.001, start + 0.11);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(start);
+        osc.stop(start + 0.11);
+      }
+    } else if (type === 'drumroll') {
+      for (let i = 0; i < 16; i++) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const start = now + i * 0.055;
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(160 + (i % 2) * 20, start);
+        gain.gain.setValueAtTime(0.08 + (i / 16) * 0.12, start);
+        gain.gain.exponentialRampToValueAtTime(0.001, start + 0.045);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(start);
+        osc.stop(start + 0.045);
+      }
+      const crashStart = now + 0.95;
+      const bufferSize = ctx.sampleRate * 1.5;
+      const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = noiseBuffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        data[i] = Math.random() * 2 - 1;
+      }
+      const crash = ctx.createBufferSource();
+      crash.buffer = noiseBuffer;
+      const highpass = ctx.createBiquadFilter();
+      highpass.type = 'highpass';
+      highpass.frequency.setValueAtTime(4000, crashStart);
+      const crashGain = ctx.createGain();
+      crashGain.gain.setValueAtTime(0.2, crashStart);
+      crashGain.gain.exponentialRampToValueAtTime(0.001, crashStart + 1.2);
+
+      crash.connect(highpass);
+      highpass.connect(crashGain);
+      crashGain.connect(ctx.destination);
+      crash.start(crashStart);
+      crash.stop(crashStart + 1.2);
+    } else if (type === 'crickets') {
+      [0, 0.08, 0.4, 0.48].forEach((offset) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(4500, now + offset);
+        gain.gain.setValueAtTime(0.09, now + offset);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.06);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now + offset);
+        osc.stop(now + offset + 0.06);
+      });
+    } else if (type === 'tadaa') {
+      const fanfare = [
+        { f: 523.25, d: 0.12 },
+        { f: 659.25, d: 0.12 },
+        { f: 783.99, d: 0.12 },
+        { f: 1046.5, d: 0.55 },
+      ];
+      let t = now;
+      fanfare.forEach((n) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(n.f, t);
+        gain.gain.setValueAtTime(0.18, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + n.d);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + n.d);
+        t += n.d * 0.75;
+      });
+    }
+  } catch {}
+}
+
+export function createSilentAudioStream(): MediaStream {
+  const ctx = getAudioContext();
+  const dest = ctx.createMediaStreamDestination();
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0, ctx.currentTime);
+  osc.connect(gain);
+  gain.connect(dest);
+  osc.start();
+  return dest.stream;
+}
+
 // ----------------- VOICE FILTER ENGINE -----------------
 export interface VoiceFilterPipeline {
   inputNode: MediaStreamAudioSourceNode;

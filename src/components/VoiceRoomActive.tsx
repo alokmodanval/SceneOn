@@ -13,13 +13,32 @@ import {
   Coffee,
   Radio,
   Zap,
+  Lock,
+  Unlock,
+  Share2,
+  Copy,
+  Check,
+  Crown,
+  Hand,
+  MessageSquare,
+  Send,
+  Music,
 } from 'lucide-react';
-import { RoomParticipant, SceneRoom, SceneUser, VoiceFilterMode } from '../types';
+import {
+  DjSoundType,
+  RoomChatMessage,
+  RoomParticipant,
+  SceneRoom,
+  SceneUser,
+  VoiceFilterMode,
+} from '../types';
 import {
   ambientMixer,
   AmbientSoundType,
+  createSilentAudioStream,
   createVoiceFilterPipeline,
   createVolumeMeter,
+  playDjSound,
   playUiSound,
   VoiceFilterPipeline,
 } from '../lib/audioEngine';
@@ -35,33 +54,45 @@ interface VoiceRoomActiveProps {
   onUpdateRoom: (room: SceneRoom) => void;
 }
 
+const DJ_SOUND_BUTTONS: { type: DjSoundType; label: string; icon: string }[] = [
+  { type: 'airhorn', label: 'Airhorn', icon: '📯' },
+  { type: 'applause', label: 'Claps', icon: '👏' },
+  { type: 'laugh', label: 'Laugh', icon: '😂' },
+  { type: 'drumroll', label: 'Drumroll', icon: '🥁' },
+  { type: 'crickets', label: 'Crickets', icon: '🦗' },
+  { type: 'tadaa', label: 'Tadaa', icon: '🎉' },
+];
+
 export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
   room,
   currentUser,
   onLeaveRoom,
   onUpdateRoom,
 }) => {
-  // Mic state
+  // Determine if current user is host
+  const isHost = room.host_id === currentUser.id || room.participants[0]?.id === currentUser.id;
+
+  // Find my current seat
+  const myExistingParticipant = room.participants.find((p) => p.id === currentUser.id);
+  const myInitialRole: 'host' | 'speaker' | 'listener' = isHost
+    ? 'host'
+    : myExistingParticipant?.role || (room.participants.length < 6 ? 'speaker' : 'listener');
+  const myInitialSeat = isHost ? 1 : myExistingParticipant?.seat_number || 2;
+
+  // Local user stage state
+  const [myRole, setMyRole] = useState<'host' | 'speaker' | 'listener'>(myInitialRole);
+  const [mySeat, setMySeat] = useState<number | undefined>(myInitialRole !== 'listener' ? myInitialSeat : undefined);
   const [isMuted, setIsMuted] = useState(true);
   const [voiceFilter, setVoiceFilter] = useState<VoiceFilterMode>('natural');
   const [isLocalSpeaking, setIsLocalSpeaking] = useState(false);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const [handRaised, setHandRaised] = useState(false);
 
-  // Ambient sound mixer state
-  const [ambientType, setAmbientType] = useState<AmbientSoundType>('none');
-  const [ambientVol, setAmbientVol] = useState(12);
-  const [showAmbientMenu, setShowAmbientMenu] = useState(false);
-
-  // Active topic
-  const [activeTopic, setActiveTopic] = useState(room.active_topic || TOPIC_DECK[0]);
-
-  // Floating reaction emojis
-  const [floatingReactions, setFloatingReactions] = useState<{ id: string; emoji: string; x: number }[]>([]);
-
-  // Participants in the room
+  // Room state
   const [participants, setParticipants] = useState<RoomParticipant[]>(() => {
     const list = [...(room.participants || [])];
-    if (!list.some((p) => p.id === currentUser.id)) {
+    const exists = list.find((p) => p.id === currentUser.id);
+    if (!exists) {
       list.push({
         id: currentUser.id,
         alias: currentUser.alias,
@@ -69,88 +100,162 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
         is_muted: true,
         is_speaking: false,
         voice_filter: 'natural',
+        role: myInitialRole,
+        seat_number: myInitialRole !== 'listener' ? myInitialSeat : undefined,
         joined_at: new Date().toISOString(),
       });
     }
     return list;
   });
 
-  // Kick votes: targetId -> array of voterIds
-  const [kickVotes, setKickVotes] = useState<Record<string, string[]>>(room.kick_votes || {});
+  const [lockedSeats, setLockedSeats] = useState<number[]>(room.locked_seats || []);
+  const [activeTopic, setActiveTopic] = useState(room.active_topic || TOPIC_DECK[0]);
+  const [floatingReactions, setFloatingReactions] = useState<{ id: string; emoji: string; x: number }[]>([]);
+  const [djAnnouncement, setDjAnnouncement] = useState<string | null>(null);
 
-  // WebRTC mesh and pipeline references
+  // In-room live chat messages
+  const [chatMessages, setChatMessages] = useState<RoomChatMessage[]>([
+    {
+      id: 'welcome',
+      sender_id: 'system',
+      sender_alias: 'SceneBot ⚡',
+      text: `Welcome to "${room.title}"! Respect the vibe & tap reaction gifts.`,
+      created_at: new Date().toISOString(),
+    },
+  ]);
+  const [chatInput, setChatInput] = useState('');
+  const [showChatBox, setShowChatBox] = useState(false);
+
+  // Ambient sound mixer state
+  const [ambientType, setAmbientType] = useState<AmbientSoundType>('none');
+  const [ambientVol, setAmbientVol] = useState(14);
+  const [showAmbientMenu, setShowAmbientMenu] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+
+  // Audio & WebRTC references
   const rawStreamRef = useRef<MediaStream | null>(null);
   const filterPipelineRef = useRef<VoiceFilterPipeline | null>(null);
   const meshRoomRef = useRef<WebRTCMeshRoom | null>(null);
   const meterCleanupRef = useRef<(() => void) | null>(null);
+  const remoteMetersRef = useRef<Map<string, () => void>>(new Map());
 
-  // Audio setup on mount
+  // Initialize WebRTC Mesh
   useEffect(() => {
     let isCancelled = false;
 
     async function initAudioAndMesh() {
+      // Step 1: Start with a silent dummy stream so audience listeners can join without permission prompts
+      let audioStream: MediaStream;
       try {
-        // Request microphone
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-          video: false,
-        });
+        if (myRole !== 'listener') {
+          // If on stage, request mic
+          audioStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+            video: false,
+          });
+          rawStreamRef.current = audioStream;
 
-        if (isCancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
+          // Mute by default
+          audioStream.getAudioTracks().forEach((t) => (t.enabled = false));
+
+          // Set up filter pipeline
+          const pipeline = createVoiceFilterPipeline(audioStream);
+          filterPipelineRef.current = pipeline;
+
+          // Meter for local speaking
+          meterCleanupRef.current = createVolumeMeter(audioStream, (_level, isSpeaking) => {
+            setIsLocalSpeaking(isSpeaking && !isMuted);
+            if (meshRoomRef.current) {
+              meshRoomRef.current.broadcastSpeaking(isSpeaking && !isMuted);
+            }
+          });
+
+          audioStream = pipeline.outputStream;
+        } else {
+          audioStream = createSilentAudioStream();
         }
-
-        rawStreamRef.current = stream;
-
-        // Auto mute by default
-        stream.getAudioTracks().forEach((track) => {
-          track.enabled = false;
-        });
-
-        // Initialize Web Audio Filter Pipeline
-        const pipeline = createVoiceFilterPipeline(stream);
-        filterPipelineRef.current = pipeline;
-
-        // Hook up volume meter for local speaking neon ring
-        const cleanupMeter = createVolumeMeter(stream, (_level, isSpeaking) => {
-          setIsLocalSpeaking(isSpeaking && !isMuted);
-          if (meshRoomRef.current) {
-            meshRoomRef.current.broadcastSpeaking(isSpeaking && !isMuted);
-          }
-        });
-        meterCleanupRef.current = cleanupMeter;
-
-        // Start WebRTC mesh room
-        const mesh = new WebRTCMeshRoom(room.id, currentUser.id, currentUser.alias, {
-          onRemoteStream: (peerId, _remoteStream) => {
-            console.log('Connected audio stream from peer:', peerId);
-          },
-          onPeerLeave: (peerId) => {
-            setParticipants((prev) => prev.filter((p) => p.id !== peerId));
-          },
-          onReaction: (emoji, _senderId) => {
-            triggerFloatingReaction(emoji);
-          },
-          onTopicChange: (newTopic) => {
-            setActiveTopic(newTopic);
-          },
-          onPeerSpeaking: (peerId, speaking) => {
-            setParticipants((prev) =>
-              prev.map((p) => (p.id === peerId ? { ...p, is_speaking: speaking } : p))
-            );
-          },
-        });
-
-        meshRoomRef.current = mesh;
-        await mesh.start(pipeline.outputStream);
       } catch (err) {
-        console.warn('Microphone permission denied or not available:', err);
+        console.warn('Microphone not acquired, continuing in listen-only mode:', err);
+        audioStream = createSilentAudioStream();
+        setMyRole('listener');
+        setMySeat(undefined);
       }
+
+      if (isCancelled) return;
+
+      // Step 2: Initialize WebRTC mesh room with PeerJS
+      const mesh = new WebRTCMeshRoom(room.id, currentUser.id, currentUser.alias, {
+        onRemoteStream: (peerId, remoteStream) => {
+          // Attach volume meter to remote stream to animate speaking ring
+          const cleanup = createVolumeMeter(remoteStream, (_level, isSpeaking) => {
+            setParticipants((prev) =>
+              prev.map((p) => (p.id === peerId ? { ...p, is_speaking: isSpeaking } : p))
+            );
+          });
+          remoteMetersRef.current.set(peerId, cleanup);
+        },
+        onPeerLeave: (peerId, leftUserId) => {
+          const target = leftUserId || peerId;
+          setParticipants((prev) => prev.filter((p) => p.id !== target));
+          const cleanup = remoteMetersRef.current.get(peerId);
+          if (cleanup) {
+            cleanup();
+            remoteMetersRef.current.delete(peerId);
+          }
+        },
+        onPeerJoin: (p) => {
+          setParticipants((prev) => {
+            if (prev.some((x) => x.id === p.id)) return prev;
+            return [
+              ...prev,
+              {
+                id: p.id || p.peerId,
+                alias: p.alias || 'GenZ Friend',
+                avatar: p.avatar || { bg: 'from-violet-600 to-indigo-900', emoji: '⚡' },
+                is_muted: true,
+                is_speaking: false,
+                voice_filter: 'natural',
+                role: p.role || 'speaker',
+                seat_number: p.seat_number,
+                joined_at: new Date().toISOString(),
+              },
+            ];
+          });
+        },
+        onReaction: (emoji) => {
+          triggerFloatingReaction(emoji);
+        },
+        onDjSound: (sound, senderAlias) => {
+          playDjSound(sound);
+          setDjAnnouncement(`🎛️ ${senderAlias} played ${sound.toUpperCase()}!`);
+          setTimeout(() => setDjAnnouncement(null), 3000);
+        },
+        onRoomChat: (msg) => {
+          setChatMessages((prev) => [...prev, msg]);
+          playUiSound('pop');
+        },
+        onTopicChange: (newTopic) => {
+          setActiveTopic(newTopic);
+        },
+        onPeerSpeaking: (peerId, speaking) => {
+          setParticipants((prev) =>
+            prev.map((p) => (p.id === peerId ? { ...p, is_speaking: speaking } : p))
+          );
+        },
+        onSeatChange: (userId, seat_number, role) => {
+          setParticipants((prev) =>
+            prev.map((p) => (p.id === userId ? { ...p, seat_number, role } : p))
+          );
+        },
+        onLockSeat: (seat_num, isLocked) => {
+          setLockedSeats((prev) =>
+            isLocked ? [...prev, seat_num] : prev.filter((s) => s !== seat_num)
+          );
+        },
+      });
+
+      meshRoomRef.current = mesh;
+      await mesh.start(audioStream, myInitialRole, myInitialSeat);
     }
 
     initAudioAndMesh();
@@ -166,6 +271,8 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
       if (meterCleanupRef.current) {
         meterCleanupRef.current();
       }
+      remoteMetersRef.current.forEach((cleanup) => cleanup());
+      remoteMetersRef.current.clear();
       if (meshRoomRef.current) {
         meshRoomRef.current.leave();
       }
@@ -173,26 +280,23 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
     };
   }, [room.id, currentUser.id, currentUser.alias]);
 
-  // Spacebar Push-to-Talk handlers
+  // Spacebar Push-to-Talk
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't trigger if user is typing in an input
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-
-      if (e.code === 'Space' && !e.repeat && isMuted) {
+      if (e.code === 'Space' && !e.repeat && isMuted && myRole !== 'listener') {
         e.preventDefault();
         setIsSpacePressed(true);
-        toggleMic(false); // unmute while held
+        toggleMic(false);
       }
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-
-      if (e.code === 'Space') {
+      if (e.code === 'Space' && myRole !== 'listener') {
         e.preventDefault();
         setIsSpacePressed(false);
-        toggleMic(true); // re-mute on release
+        toggleMic(true);
       }
     };
 
@@ -202,17 +306,42 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [isMuted]);
+  }, [isMuted, myRole]);
 
-  // Toggle microphone
-  const toggleMic = (forceState?: boolean) => {
+  // Toggle Microphone
+  const toggleMic = async (forceState?: boolean) => {
+    if (myRole === 'listener') {
+      alert('You are currently listening. Take a mic seat above to speak!');
+      return;
+    }
+
     const nextState = forceState !== undefined ? forceState : !isMuted;
+
+    // If we don't have mic tracks yet, acquire mic now
+    if (!rawStreamRef.current && !nextState) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        rawStreamRef.current = stream;
+        const pipeline = createVoiceFilterPipeline(stream);
+        filterPipelineRef.current = pipeline;
+        if (meshRoomRef.current) {
+          meshRoomRef.current.updateLocalStream(pipeline.outputStream);
+        }
+      } catch (err) {
+        alert('Microphone permission needed to speak.');
+        return;
+      }
+    }
+
     setIsMuted(nextState);
 
     if (rawStreamRef.current) {
-      rawStreamRef.current.getAudioTracks().forEach((t) => {
-        t.enabled = !nextState;
-      });
+      rawStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = !nextState));
+    }
+    if (filterPipelineRef.current) {
+      filterPipelineRef.current.outputStream.getAudioTracks().forEach((t) => (t.enabled = !nextState));
     }
 
     playUiSound('pop');
@@ -221,7 +350,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
     );
   };
 
-  // Change voice filter
+  // Change Voice Filter
   const handleFilterChange = (mode: VoiceFilterMode) => {
     playUiSound('click');
     setVoiceFilter(mode);
@@ -230,33 +359,92 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
     }
   };
 
-  // Ambient sound selector
-  const handleAmbientChange = (type: AmbientSoundType) => {
+  // Take a specific seat (or general take mic)
+  const handleTakeSeat = async (seatNum: number) => {
     playUiSound('click');
-    setAmbientType(type);
-    ambientMixer.setAmbient(type, ambientVol);
-  };
-
-  const handleAmbientVolChange = (vol: number) => {
-    setAmbientVol(vol);
-    ambientMixer.setVolume(vol);
-  };
-
-  // Flip discussion topic
-  const handleFlipTopic = () => {
-    playUiSound('pop');
-    const remaining = TOPIC_DECK.filter((t) => t !== activeTopic);
-    const nextTopic = remaining[Math.floor(Math.random() * remaining.length)] || TOPIC_DECK[0];
-    setActiveTopic(nextTopic);
-
-    if (meshRoomRef.current) {
-      meshRoomRef.current.broadcastTopic(nextTopic);
+    if (lockedSeats.includes(seatNum)) {
+      alert(`Seat #${seatNum} is locked by the room host.`);
+      return;
     }
 
-    onUpdateRoom({
-      ...room,
-      active_topic: nextTopic,
-    });
+    try {
+      if (!rawStreamRef.current) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        rawStreamRef.current = stream;
+        stream.getAudioTracks().forEach((t) => (t.enabled = false));
+        const pipeline = createVoiceFilterPipeline(stream);
+        filterPipelineRef.current = pipeline;
+        if (meshRoomRef.current) {
+          meshRoomRef.current.updateLocalStream(pipeline.outputStream);
+        }
+      }
+    } catch {
+      alert('Could not access microphone.');
+      return;
+    }
+
+    setMyRole('speaker');
+    setMySeat(seatNum);
+    setIsMuted(true);
+
+    if (meshRoomRef.current) {
+      meshRoomRef.current.broadcastSeatChange(seatNum, 'speaker');
+    }
+
+    setParticipants((prev) =>
+      prev.map((p) =>
+        p.id === currentUser.id ? { ...p, role: 'speaker', seat_number: seatNum, is_muted: true } : p
+      )
+    );
+  };
+
+  // Step down to audience
+  const handleStepDown = () => {
+    playUiSound('click');
+    setMyRole('listener');
+    setMySeat(undefined);
+    setIsMuted(true);
+
+    if (rawStreamRef.current) {
+      rawStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = false));
+    }
+
+    if (meshRoomRef.current) {
+      meshRoomRef.current.broadcastSeatChange(undefined, 'listener');
+    }
+
+    setParticipants((prev) =>
+      prev.map((p) =>
+        p.id === currentUser.id ? { ...p, role: 'listener', seat_number: undefined, is_muted: true } : p
+      )
+    );
+  };
+
+  // Lock / Unlock seat (Host only)
+  const handleToggleLockSeat = (seatNum: number) => {
+    if (!isHost) return;
+    playUiSound('pop');
+    const isCurrentlyLocked = lockedSeats.includes(seatNum);
+    const updated = isCurrentlyLocked
+      ? lockedSeats.filter((s) => s !== seatNum)
+      : [...lockedSeats, seatNum];
+
+    setLockedSeats(updated);
+    if (meshRoomRef.current) {
+      meshRoomRef.current.broadcastLockSeat(seatNum, !isCurrentlyLocked);
+    }
+  };
+
+  // Play DJ Soundboard SFX
+  const handleTriggerDjSound = (type: DjSoundType) => {
+    playDjSound(type);
+    if (meshRoomRef.current) {
+      meshRoomRef.current.sendDjSound(type);
+    }
+    setDjAnnouncement(`🎛️ You played ${type.toUpperCase()}!`);
+    setTimeout(() => setDjAnnouncement(null), 2500);
   };
 
   // Trigger floating reaction emoji
@@ -277,94 +465,132 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
     }, 2000);
   };
 
-  // Vote Kick participant
-  const handleVoteKick = (targetId: string, targetAlias: string) => {
-    playUiSound('kick');
-    const currentVoters = kickVotes[targetId] || [];
-    if (currentVoters.includes(currentUser.id)) {
-      alert(`You have already voted to kick ${targetAlias}.`);
-      return;
-    }
+  // Send in-room chat message
+  const handleSendChat = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!chatInput.trim() || !meshRoomRef.current) return;
+    const msg = meshRoomRef.current.sendRoomChatMessage(chatInput);
+    setChatMessages((prev) => [...prev, msg]);
+    setChatInput('');
+    playUiSound('pop');
+  };
 
-    const updatedVoters = [...currentVoters, currentUser.id];
-    const updatedVotes = { ...kickVotes, [targetId]: updatedVoters };
-    setKickVotes(updatedVotes);
+  // Flip discussion topic
+  const handleFlipTopic = () => {
+    playUiSound('pop');
+    const remaining = TOPIC_DECK.filter((t) => t !== activeTopic);
+    const nextTopic = remaining[Math.floor(Math.random() * remaining.length)] || TOPIC_DECK[0];
+    setActiveTopic(nextTopic);
 
-    if (updatedVoters.length >= 2) {
-      // 2-Vote threshold reached: kick target participant!
-      playUiSound('kick');
-      setParticipants((prev) => prev.filter((p) => p.id !== targetId));
-      alert(`🚫 ${targetAlias} was voted out by the room community.`);
-    } else {
-      alert(`Vote registered against ${targetAlias} (1/2 votes needed).`);
+    if (meshRoomRef.current) {
+      meshRoomRef.current.broadcastTopic(nextTopic);
     }
 
     onUpdateRoom({
       ...room,
-      kick_votes: updatedVotes,
+      active_topic: nextTopic,
     });
   };
 
-  // Award Aura to participant
-  const handleAwardAura = async (targetId: string, amount: number) => {
-    playUiSound('pop');
-    const res = await voteAura(targetId, currentUser.id, amount);
-    if (!res.success) {
-      alert(res.message || 'Already voted for this participant');
-    } else {
-      confetti({
-        particleCount: 30,
-        spread: 50,
-        origin: { y: 0.7 },
-      });
-      alert(`Aura vote recorded! (${amount > 0 ? '+1 Aura ⚡' : '-2 Aura 🚩'})`);
-    }
+  // Ambient sound selector
+  const handleAmbientChange = (type: AmbientSoundType) => {
+    playUiSound('click');
+    setAmbientType(type);
+    ambientMixer.setAmbient(type, ambientVol);
   };
 
+  const handleAmbientVolChange = (vol: number) => {
+    setAmbientVol(vol);
+    ambientMixer.setVolume(vol);
+  };
+
+  // Copy shareable room link
+  const handleCopyInvite = () => {
+    const url = `${window.location.origin}/?room=${room.id}${
+      room.is_private && room.room_pin ? `&pin=${room.room_pin}` : ''
+    }`;
+    navigator.clipboard.writeText(url);
+    setCopiedLink(true);
+    playUiSound('click');
+    setTimeout(() => setCopiedLink(false), 2000);
+  };
+
+  // Stage speakers vs Listeners
+  const speakers = participants.filter((p) => p.role === 'host' || p.role === 'speaker');
+  const listeners = participants.filter((p) => p.role === 'listener');
+
   return (
-    <div className="relative w-full max-w-5xl mx-auto rounded-3xl bg-[#0D0D12] border-2 border-[#CCFF00] p-4 sm:p-8 shadow-neo overflow-hidden animate-fadeIn">
-      {/* Floating Reactions Canvas Layer */}
+    <div className="relative w-full max-w-5xl mx-auto rounded-3xl bg-[#0D0D12] border-2 border-[#CCFF00] p-4 sm:p-7 shadow-neo overflow-hidden animate-fadeIn">
+      {/* Floating Reactions Canvas */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden z-30">
         {floatingReactions.map((r) => (
           <div
             key={r.id}
             style={{ left: `${r.x}%` }}
-            className="absolute bottom-16 text-3xl sm:text-4xl animate-float-reaction"
+            className="absolute bottom-20 text-3xl sm:text-4xl animate-float-reaction"
           >
             {r.emoji}
           </div>
         ))}
       </div>
 
-      {/* Room Header */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-6 border-b border-white/10">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
+      {/* Top DJ Announcement Banner */}
+      {djAnnouncement && (
+        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 bg-[#CCFF00] text-black font-mono font-black text-xs px-4 py-1.5 rounded-full shadow-neo animate-bounce">
+          {djAnnouncement}
+        </div>
+      )}
+
+      {/* Header Bar */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-5 border-b border-white/10">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="flex h-2.5 w-2.5 relative">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#CCFF00] opacity-75"></span>
               <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#CCFF00]"></span>
             </span>
-            <span className="text-xs font-mono font-bold text-[#CCFF00] uppercase tracking-wider">
-              LIVE P2P VOICE SCENE
-            </span>
+
+            {room.is_private ? (
+              <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded-full bg-violet-500/20 text-violet-300 border border-violet-500/40 flex items-center gap-1">
+                <Lock className="w-3 h-3" />
+                <span>PRIVATE VIP POD • PIN: {room.room_pin}</span>
+              </span>
+            ) : (
+              <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                🌐 GLOBAL SCENE
+              </span>
+            )}
+
             <span className="text-xs font-mono text-white/50 px-2 py-0.5 rounded bg-white/5">
               {room.vibe_tag}
             </span>
           </div>
-          <h2 className="text-2xl sm:text-3xl font-heading font-black text-white">
+
+          <h2 className="text-xl sm:text-2xl font-heading font-black text-white">
             {room.title}
           </h2>
         </div>
 
-        {/* Ambient Sounds Toggle & Leave */}
-        <div className="flex items-center gap-2 self-stretch sm:self-auto justify-end">
+        {/* Right Header Actions */}
+        <div className="flex items-center gap-2 self-stretch sm:self-auto justify-end flex-wrap">
+          {/* Share Link */}
+          <button
+            onClick={handleCopyInvite}
+            title="Copy 1-Click Invite Link"
+            className="px-3 py-1.5 rounded-xl text-xs font-mono bg-white/5 hover:bg-white/10 text-white/80 hover:text-white border border-white/10 flex items-center gap-1.5 transition-all"
+          >
+            {copiedLink ? <Check className="w-3.5 h-3.5 text-[#CCFF00]" /> : <Share2 className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">{copiedLink ? 'Copied Link!' : 'Invite Friends'}</span>
+          </button>
+
+          {/* Ambient BGM Mixer */}
           <div className="relative">
             <button
               onClick={() => {
                 playUiSound('click');
                 setShowAmbientMenu(!showAmbientMenu);
               }}
-              className={`px-3 py-2 rounded-xl text-xs font-mono flex items-center gap-1.5 border transition-all ${
+              className={`px-3 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 border transition-all ${
                 ambientType !== 'none'
                   ? 'bg-violet-600/20 border-violet-500 text-violet-300'
                   : 'bg-[#15151c] border-white/10 text-white/70 hover:text-white'
@@ -375,18 +601,17 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
                 {ambientType === 'rain'
                   ? '🌧️ Rain'
                   : ambientType === 'cafe'
-                  ? '☕ Cafe'
+                  ? '☕ Tapri'
                   : ambientType === 'lofi'
                   ? '🎵 Lo-Fi'
-                  : 'Ambient Vibe'}
+                  : 'BGM'}
               </span>
             </button>
 
-            {/* Ambient Sound Dropdown */}
             {showAmbientMenu && (
-              <div className="absolute right-0 mt-2 w-64 p-3 rounded-2xl bg-[#15151c] border border-white/20 shadow-neo z-40 space-y-3">
-                <span className="text-[11px] font-mono text-white/60 block">
-                  SYNTHESIZED AMBIENT BACKGROUND
+              <div className="absolute right-0 mt-2 w-64 p-3 rounded-2xl bg-[#15151c] border border-white/20 shadow-neo z-50 space-y-3">
+                <span className="text-[11px] font-mono text-white/60 block font-bold">
+                  ROOM AMBIENT VIBE SYNTH
                 </span>
                 <div className="grid grid-cols-2 gap-1.5">
                   <button
@@ -419,7 +644,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
                     }`}
                   >
                     <Coffee className="w-3 h-3 text-amber-400" />
-                    <span>Cafe</span>
+                    <span>Chai Tapri</span>
                   </button>
                   <button
                     onClick={() => handleAmbientChange('lofi')}
@@ -443,10 +668,10 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
                     <input
                       type="range"
                       min="3"
-                      max="25"
+                      max="30"
                       value={ambientVol}
                       onChange={(e) => handleAmbientVolChange(Number(e.target.value))}
-                      className="w-full"
+                      className="w-full accent-[#CCFF00]"
                     />
                   </div>
                 )}
@@ -454,157 +679,303 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
             )}
           </div>
 
+          {/* Leave Button */}
           <button
             onClick={() => {
               playUiSound('click');
               onLeaveRoom();
             }}
-            className="px-4 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-400 font-mono text-xs font-bold flex items-center gap-1.5 transition-all"
+            className="px-3.5 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-400 font-mono text-xs font-bold flex items-center gap-1.5 transition-all"
           >
             <PhoneOff className="w-3.5 h-3.5" />
-            <span>Leave Scene</span>
+            <span>Leave</span>
           </button>
         </div>
       </div>
 
-      {/* Synchronous Discussion Topic Deck */}
-      <div className="my-6 p-4 sm:p-5 rounded-2xl bg-[#111116] border border-white/15 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-        <div className="space-y-1 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-[#CCFF00]/10 text-[#CCFF00] border border-[#CCFF00]/30">
-              CURRENT SCENE DEBATE TOPIC 🎲
-            </span>
-          </div>
-          <p className="text-base sm:text-lg font-heading font-bold text-white">
+      {/* Discussion Topic Card */}
+      <div className="my-4 p-4 rounded-2xl bg-[#111116] border border-white/15 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+        <div className="space-y-0.5 flex-1">
+          <span className="text-[10px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-[#CCFF00]/10 text-[#CCFF00] border border-[#CCFF00]/30">
+            ACTIVE DISCUSSION TOPIC 🎲
+          </span>
+          <p className="text-sm sm:text-base font-heading font-bold text-white mt-1">
             &quot;{activeTopic}&quot;
           </p>
         </div>
 
         <button
           onClick={handleFlipTopic}
-          className="neo-btn-dark px-4 py-2.5 rounded-xl text-xs font-mono font-bold flex items-center gap-2 flex-shrink-0"
+          className="neo-btn-dark px-3 py-2 rounded-xl text-xs font-mono font-bold flex items-center gap-1.5 flex-shrink-0"
         >
-          <Dices className="w-4 h-4 text-[#CCFF00]" />
-          <span>Flip Next Topic</span>
+          <Dices className="w-3.5 h-3.5 text-[#CCFF00]" />
+          <span>Flip Topic</span>
         </button>
       </div>
 
-      {/* 6-Participant Mesh Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4 my-6">
-        {participants.slice(0, 6).map((participant) => {
-          const isMe = participant.id === currentUser.id;
-          const isSpeaking = isMe ? isLocalSpeaking : participant.is_speaking;
-          const participantMuted = isMe ? isMuted : participant.is_muted;
-          const votesCount = kickVotes[participant.id]?.length || 0;
-
-          return (
-            <div
-              key={participant.id}
-              className={`relative flex flex-col items-center p-4 rounded-2xl bg-[#111116] border transition-all ${
-                isSpeaking
-                  ? 'border-[#CCFF00] shadow-glow-lime scale-105'
-                  : 'border-white/10 hover:border-white/20'
-              }`}
+      {/* Hello Yo-Style 6-Seat Interactive Stage Grid */}
+      <div className="my-5">
+        <div className="flex items-center justify-between mb-3 text-xs font-mono text-white/60">
+          <span className="flex items-center gap-1.5">
+            <Radio className="w-3.5 h-3.5 text-[#CCFF00]" />
+            <strong className="text-white">STAGE SEATS ({speakers.length}/6)</strong>
+          </span>
+          {myRole !== 'listener' ? (
+            <button
+              onClick={handleStepDown}
+              className="text-xs text-violet-400 hover:underline flex items-center gap-1"
             >
-              {/* Avatar with Acid Lime Pulse Speaking Ring */}
-              <div className="relative mb-3">
-                <div
-                  className={`w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-gradient-to-tr ${
-                    participant.avatar?.bg || 'from-violet-600 to-indigo-900'
-                  } flex items-center justify-center text-2xl sm:text-3xl transition-all ${
-                    isSpeaking
-                      ? 'ring-4 ring-[#CCFF00] ring-offset-4 ring-offset-[#070709] animate-pulse-speaking'
-                      : 'border-2 border-white/20'
-                  }`}
-                >
-                  {participant.avatar?.emoji || '⚡'}
-                </div>
+              <span>🚶 Step Down to Audience</span>
+            </button>
+          ) : (
+            <span className="text-[11px] text-white/40">Tap any open seat to take mic</span>
+          )}
+        </div>
 
-                {/* Mic Status Icon */}
+        {/* 6 Stage Pods Grid */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          {[1, 2, 3, 4, 5, 6].map((seatNum) => {
+            const occupant = speakers.find((p) => (p.seat_number || 1) === seatNum);
+            const isMe = occupant?.id === currentUser.id;
+            const isSpeaking = isMe ? isLocalSpeaking : occupant?.is_speaking;
+            const isOccupantMuted = isMe ? isMuted : occupant?.is_muted;
+            const isSeatLocked = lockedSeats.includes(seatNum);
+
+            if (occupant) {
+              return (
                 <div
-                  className={`absolute -bottom-1 -right-1 w-6 h-6 rounded-full flex items-center justify-center text-xs border-2 border-[#070709] ${
-                    participantMuted
-                      ? 'bg-rose-500 text-white'
-                      : 'bg-[#CCFF00] text-black font-bold'
+                  key={`seat-${seatNum}`}
+                  className={`relative flex flex-col items-center p-3 rounded-2xl bg-[#111116] border transition-all ${
+                    isSpeaking
+                      ? 'border-[#CCFF00] shadow-glow-lime scale-[1.03]'
+                      : 'border-white/10 hover:border-white/20'
                   }`}
                 >
-                  {participantMuted ? (
-                    <MicOff className="w-3 h-3" />
+                  {/* Seat Number Tag */}
+                  <div className="absolute top-2 left-2 text-[10px] font-mono text-white/40">
+                    #{seatNum}
+                  </div>
+
+                  {/* Host Crown */}
+                  {seatNum === 1 && (
+                    <div className="absolute top-2 right-2 text-amber-400" title="Room Host">
+                      <Crown className="w-3.5 h-3.5 fill-current" />
+                    </div>
+                  )}
+
+                  {/* Avatar with Acid Lime Pulse Speaking Ring */}
+                  <div className="relative my-2">
+                    <div
+                      className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full bg-gradient-to-tr ${
+                        occupant.avatar?.bg || 'from-violet-600 to-indigo-900'
+                      } flex items-center justify-center text-2xl transition-all ${
+                        isSpeaking
+                          ? 'ring-4 ring-[#CCFF00] ring-offset-2 ring-offset-[#070709] animate-pulse-speaking'
+                          : 'border border-white/20'
+                      }`}
+                    >
+                      {occupant.avatar?.emoji || '⚡'}
+                    </div>
+
+                    {/* Mic Status Icon */}
+                    <div
+                      className={`absolute -bottom-1 -right-1 w-5 h-5 rounded-full flex items-center justify-center text-[10px] border-2 border-[#070709] ${
+                        isOccupantMuted ? 'bg-rose-500 text-white' : 'bg-[#CCFF00] text-black font-bold'
+                      }`}
+                    >
+                      {isOccupantMuted ? <MicOff className="w-3 h-3" /> : <Mic className="w-3 h-3" />}
+                    </div>
+                  </div>
+
+                  {/* Alias & Identity */}
+                  <span className="font-heading font-bold text-xs text-white text-center truncate max-w-full">
+                    {occupant.alias} {isMe && '(You)'}
+                  </span>
+
+                  {/* Voice Mask Badge */}
+                  {isMe && voiceFilter !== 'natural' ? (
+                    <span className="text-[9px] font-mono text-[#00F0FF] uppercase mt-0.5">
+                      {voiceFilter}
+                    </span>
                   ) : (
-                    <Mic className="w-3 h-3" />
+                    <span className="text-[10px] font-mono text-white/40 mt-0.5">
+                      {seatNum === 1 ? 'Host' : 'Speaker'}
+                    </span>
                   )}
                 </div>
-              </div>
+              );
+            }
 
-              {/* Alias & Tags */}
-              <span className="font-heading font-bold text-sm text-white text-center truncate max-w-full">
-                {participant.alias} {isMe && '(You)'}
-              </span>
-
-              {/* Filter badge if active */}
-              {isMe && voiceFilter !== 'natural' && (
-                <span className="text-[9px] font-mono text-[#00F0FF] uppercase mt-0.5">
-                  Mask: {voiceFilter}
-                </span>
-              )}
-
-              {/* Moderation Actions for other participants */}
-              {!isMe && (
-                <div className="mt-3 flex items-center gap-1.5 opacity-60 hover:opacity-100 transition-opacity">
-                  <button
-                    onClick={() => handleAwardAura(participant.id, 1)}
-                    title="Give W Scene (+1 Aura)"
-                    className="p-1 rounded bg-white/5 hover:bg-[#CCFF00]/20 text-[#CCFF00] text-[10px] font-mono"
-                  >
-                    +1⚡
-                  </button>
-                  <button
-                    onClick={() => handleVoteKick(participant.id, participant.alias)}
-                    title={`Vote Kick (${votesCount}/2 votes)`}
-                    className="p-1 rounded bg-white/5 hover:bg-rose-500/20 text-rose-400 text-[10px] font-mono flex items-center gap-0.5"
-                  >
-                    <ShieldAlert className="w-3 h-3" />
-                    {votesCount > 0 && <span>{votesCount}</span>}
-                  </button>
+            // Empty Seat
+            return (
+              <div
+                key={`empty-seat-${seatNum}`}
+                className="relative flex flex-col items-center justify-center p-3 rounded-2xl bg-white/[0.02] border border-dashed border-white/10 hover:border-[#CCFF00]/40 transition-all min-h-[130px] group"
+              >
+                <div className="absolute top-2 left-2 text-[10px] font-mono text-white/30">
+                  #{seatNum}
                 </div>
-              )}
-            </div>
-          );
-        })}
 
-        {/* Empty Seats Filler up to 6 */}
-        {Array.from({ length: Math.max(0, 6 - participants.length) }).map((_, idx) => (
-          <div
-            key={`empty-${idx}`}
-            className="flex flex-col items-center justify-center p-4 rounded-2xl bg-white/[0.02] border border-dashed border-white/10 min-h-[140px]"
-          >
-            <div className="w-12 h-12 rounded-full border border-dashed border-white/20 flex items-center justify-center text-white/30 text-xs mb-2 font-mono">
-              Seat #{participants.length + idx + 1}
-            </div>
-            <span className="text-[11px] font-mono text-white/30">Open Mic</span>
+                {isHost && (
+                  <button
+                    onClick={() => handleToggleLockSeat(seatNum)}
+                    title={isSeatLocked ? 'Unlock Seat' : 'Lock Seat'}
+                    className="absolute top-2 right-2 text-white/30 hover:text-white"
+                  >
+                    {isSeatLocked ? (
+                      <Lock className="w-3.5 h-3.5 text-rose-400" />
+                    ) : (
+                      <Unlock className="w-3.5 h-3.5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    )}
+                  </button>
+                )}
+
+                {isSeatLocked ? (
+                  <div className="flex flex-col items-center gap-1 text-rose-400/70">
+                    <Lock className="w-6 h-6" />
+                    <span className="text-[10px] font-mono">Locked</span>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => handleTakeSeat(seatNum)}
+                    className="flex flex-col items-center gap-1.5 text-white/40 group-hover:text-[#CCFF00] transition-colors"
+                  >
+                    <div className="w-10 h-10 rounded-full border border-dashed border-white/20 group-hover:border-[#CCFF00] flex items-center justify-center text-sm font-bold">
+                      +
+                    </div>
+                    <span className="text-[10px] font-mono font-bold">Take Mic</span>
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Audience Section (Listeners Floor) */}
+      {listeners.length > 0 && (
+        <div className="mb-5 p-3 rounded-2xl bg-[#111116] border border-white/10">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[11px] font-mono text-white/60 flex items-center gap-1.5">
+              <Users className="w-3.5 h-3.5 text-violet-400" />
+              <span>AUDIENCE LISTENERS ({listeners.length})</span>
+            </span>
           </div>
-        ))}
+          <div className="flex items-center gap-2 overflow-x-auto pb-1">
+            {listeners.map((listener) => (
+              <div
+                key={listener.id}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/5 border border-white/10 flex-shrink-0"
+              >
+                <div
+                  className={`w-5 h-5 rounded-full bg-gradient-to-tr ${
+                    listener.avatar?.bg || 'from-violet-600 to-indigo-900'
+                  } flex items-center justify-center text-[10px]`}
+                >
+                  {listener.avatar?.emoji || '⚡'}
+                </div>
+                <span className="text-xs text-white/80 font-mono">
+                  {listener.alias} {listener.id === currentUser.id && '(You)'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* DJ Soundboard Bar (Hello Yo signature SFX) */}
+      <div className="my-4 p-3 rounded-2xl bg-[#111116] border border-white/10">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-[11px] font-mono font-bold text-[#CCFF00] flex items-center gap-1.5">
+            <Music className="w-3.5 h-3.5" />
+            <span>ROOM DJ SOUNDBOARD (LIVE SFX)</span>
+          </span>
+          <span className="text-[10px] font-mono text-white/40">Broadcasts sound to all</span>
+        </div>
+        <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+          {DJ_SOUND_BUTTONS.map((sfx) => (
+            <button
+              key={sfx.type}
+              onClick={() => handleTriggerDjSound(sfx.type)}
+              className="py-2 px-2.5 rounded-xl bg-white/5 hover:bg-[#CCFF00]/15 hover:border-[#CCFF00] border border-white/10 text-xs font-mono font-bold text-white flex items-center justify-center gap-1.5 transition-all active:scale-95 shadow-sm"
+            >
+              <span>{sfx.icon}</span>
+              <span>{sfx.label}</span>
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* Floating Reaction Bar */}
-      <div className="flex items-center justify-center gap-2 py-3 border-t border-white/10">
-        <span className="text-[11px] font-mono text-white/50 mr-2 hidden sm:inline">
-          REACTIONS:
-        </span>
-        {['🔥', '💀', '😂', '⚡', '👏', '🧢'].map((emoji) => (
-          <button
-            key={emoji}
-            onClick={() => handleSendReaction(emoji)}
-            className="text-xl sm:text-2xl p-2 rounded-xl bg-white/5 hover:bg-white/15 hover:scale-125 active:scale-95 transition-all"
-          >
-            {emoji}
-          </button>
-        ))}
+      {/* Reaction Flying Bar */}
+      <div className="flex items-center justify-between gap-2 py-3 border-t border-white/10">
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+          <span className="text-[11px] font-mono text-white/50 mr-1 hidden sm:inline">
+            GIFTS & REACTIONS:
+          </span>
+          {['🔥', '💖', '🚀', '👑', '⚡', '🍕', '👏', '😂'].map((emoji) => (
+            <button
+              key={emoji}
+              onClick={() => handleSendReaction(emoji)}
+              className="text-xl p-1.5 sm:p-2 rounded-xl bg-white/5 hover:bg-white/15 hover:scale-125 active:scale-95 transition-all"
+            >
+              {emoji}
+            </button>
+          ))}
+        </div>
+
+        {/* In-Room Live Chat Toggle */}
+        <button
+          onClick={() => {
+            playUiSound('pop');
+            setShowChatBox(!showChatBox);
+          }}
+          className={`px-3 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 border transition-all ${
+            showChatBox
+              ? 'bg-[#CCFF00] text-black font-bold border-black'
+              : 'bg-white/5 text-white/70 border-white/10 hover:text-white'
+          }`}
+        >
+          <MessageSquare className="w-3.5 h-3.5" />
+          <span>Live Chat ({chatMessages.length})</span>
+        </button>
       </div>
 
-      {/* Bottom Microphone & Voice Mask Controls Bar */}
-      <div className="pt-6 border-t border-white/10 flex flex-col md:flex-row items-center justify-between gap-4">
-        {/* Left: 4 Voice Filter Pills */}
+      {/* Live In-Room Chat Drawer if open */}
+      {showChatBox && (
+        <div className="my-3 p-3 rounded-2xl bg-[#070709] border border-white/15 space-y-2 animate-fadeIn">
+          <div className="h-32 overflow-y-auto space-y-1.5 pr-1 text-xs">
+            {chatMessages.map((msg) => (
+              <div key={msg.id} className="flex items-start gap-1.5 font-mono">
+                <span className="text-[#CCFF00] font-bold flex-shrink-0">
+                  {msg.sender_alias}:
+                </span>
+                <span className="text-white/80">{msg.text}</span>
+              </div>
+            ))}
+          </div>
+
+          <form onSubmit={handleSendChat} className="flex items-center gap-2 pt-2 border-t border-white/10">
+            <input
+              type="text"
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              placeholder="Drop a live comment in the room..."
+              className="flex-1 px-3 py-1.5 rounded-xl bg-[#111116] border border-white/15 focus:border-[#CCFF00] text-white text-xs outline-none"
+            />
+            <button
+              type="submit"
+              disabled={!chatInput.trim()}
+              className="neo-btn-lime p-2 rounded-xl disabled:opacity-40"
+            >
+              <Send className="w-3.5 h-3.5 fill-black" />
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* Bottom Mic & Voice Mask Control Bar */}
+      <div className="pt-4 border-t border-white/10 flex flex-col md:flex-row items-center justify-between gap-4">
+        {/* Left: Voice Filter Pills */}
         <div className="flex items-center gap-1.5 flex-wrap justify-center">
           <span className="text-[11px] font-mono text-white/50 mr-1 flex items-center gap-1">
             <Sliders className="w-3 h-3" />
@@ -613,18 +984,19 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
           {(
             [
               { mode: 'natural', label: '🎙️ Natural' },
-              { mode: 'deep', label: '🕵️ Stealth Deep' },
+              { mode: 'deep', label: '🕵️ Deep DJ' },
               { mode: 'helium', label: '✨ Helium' },
-              { mode: 'radio', label: '📻 Vintage Lo-Fi' },
+              { mode: 'radio', label: '📻 Vintage Radio' },
             ] as const
           ).map((filter) => (
             <button
               key={filter.mode}
               onClick={() => handleFilterChange(filter.mode)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-mono transition-all border ${
-                voiceFilter === filter.mode
+              disabled={myRole === 'listener'}
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-mono transition-all border ${
+                voiceFilter === filter.mode && myRole !== 'listener'
                   ? 'bg-[#CCFF00] text-black font-bold border-black shadow-neo-sm'
-                  : 'bg-[#15151c] text-white/70 border-white/10 hover:border-white/30 hover:text-white'
+                  : 'bg-[#15151c] text-white/70 border-white/10 hover:border-white/30 disabled:opacity-40'
               }`}
             >
               {filter.label}
@@ -634,39 +1006,55 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
 
         {/* Center: Main Mic Toggle Button */}
         <div className="flex items-center gap-3">
-          <button
-            onClick={() => toggleMic()}
-            className={`px-6 py-3 rounded-2xl font-heading font-black text-sm flex items-center gap-2 border-2 transition-all ${
-              isMuted
-                ? 'bg-[#15151c] text-white border-white/20 hover:border-white/40 shadow-sm'
-                : 'bg-[#CCFF00] text-black border-black shadow-neo scale-105'
-            }`}
-          >
-            {isMuted ? (
-              <>
-                <MicOff className="w-5 h-5 text-rose-400" />
-                <span>Unmute Mic</span>
-              </>
-            ) : (
-              <>
-                <Mic className="w-5 h-5 text-black" />
-                <span>Mute Mic (Live 🎙️)</span>
-              </>
-            )}
-          </button>
+          {myRole === 'listener' ? (
+            <button
+              onClick={() => handleTakeSeat(speakers.length + 1 <= 6 ? speakers.length + 1 : 2)}
+              className="neo-btn-lime px-6 py-3 rounded-2xl font-heading font-black text-sm flex items-center gap-2 shadow-neo"
+            >
+              <Mic className="w-5 h-5 fill-black" />
+              <span>🎙️ Hop On Mic (Take Seat)</span>
+            </button>
+          ) : (
+            <button
+              onClick={() => toggleMic()}
+              className={`px-6 py-3 rounded-2xl font-heading font-black text-sm flex items-center gap-2 border-2 transition-all ${
+                isMuted
+                  ? 'bg-[#15151c] text-white border-white/20 hover:border-white/40 shadow-sm'
+                  : 'bg-[#CCFF00] text-black border-black shadow-neo scale-105'
+              }`}
+            >
+              {isMuted ? (
+                <>
+                  <MicOff className="w-5 h-5 text-rose-400" />
+                  <span>Unmute Mic (Spacebar)</span>
+                </>
+              ) : (
+                <>
+                  <Mic className="w-5 h-5 text-black" />
+                  <span>Mute Mic (Live 🎙️)</span>
+                </>
+              )}
+            </button>
+          )}
         </div>
 
         {/* Right: Push-To-Talk Keyboard Prompt */}
         <div className="text-right">
-          <span
-            className={`text-xs font-mono px-3 py-1.5 rounded-lg border transition-all ${
-              isSpacePressed
-                ? 'bg-[#CCFF00] text-black border-black font-bold'
-                : 'bg-white/5 text-white/60 border-white/10'
-            }`}
-          >
-            Hold <strong className="text-white font-bold">Spacebar</strong> to Talk
-          </span>
+          {myRole !== 'listener' ? (
+            <span
+              className={`text-xs font-mono px-3 py-1.5 rounded-lg border transition-all ${
+                isSpacePressed
+                  ? 'bg-[#CCFF00] text-black border-black font-bold'
+                  : 'bg-white/5 text-white/60 border-white/10'
+              }`}
+            >
+              Hold <strong className="text-white font-bold">Spacebar</strong> to Talk
+            </span>
+          ) : (
+            <span className="text-xs font-mono text-white/40">
+              🎧 Listening Mode Active
+            </span>
+          )}
         </div>
       </div>
     </div>
