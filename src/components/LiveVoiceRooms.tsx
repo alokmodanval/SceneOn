@@ -111,8 +111,8 @@ export const LiveVoiceRooms: React.FC<LiveVoiceRoomsProps> = ({
                   </p>
                 </div>
 
-                {/* Avatars of active speakers */}
-                {count > 0 && (
+                {/* Avatars of active speakers or open mic indicator */}
+                {count > 0 ? (
                   <div className="flex items-center gap-1.5 mb-4">
                     <span className="text-[10px] font-mono text-white/40 mr-1">
                       AT THE TABLE:
@@ -130,6 +130,11 @@ export const LiveVoiceRooms: React.FC<LiveVoiceRoomsProps> = ({
                         </div>
                       ))}
                     </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5 mb-4 text-[11px] font-mono text-white/40">
+                    <span className="w-2 h-2 rounded-full bg-[#CCFF00]/60 inline-block" />
+                    <span>Table open • Hop on to start the scene</span>
                   </div>
                 )}
               </div>

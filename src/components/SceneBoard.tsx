@@ -97,14 +97,47 @@ export const SceneBoard: React.FC<SceneBoardProps> = ({
 
       {/* Empty State */}
       {scoredPeers.length === 0 && (
-        <div className="text-center py-16 px-4 rounded-3xl bg-[#111116] border border-white/10 space-y-3">
-          <span className="text-4xl">🦉</span>
-          <h3 className="font-heading font-black text-xl text-white">
-            No active vibes under this filter
-          </h3>
-          <p className="text-xs sm:text-sm text-white/50 max-w-md mx-auto">
-            Switch to &quot;All Vibes&quot; or be the first to set your scene in this category!
-          </p>
+        <div className="text-center py-12 sm:py-16 px-6 rounded-3xl bg-[#111116] border-2 border-white/10 hover:border-[#CCFF00]/40 transition-colors max-w-xl mx-auto space-y-4">
+          <div className="w-16 h-16 rounded-2xl bg-[#CCFF00]/10 border border-[#CCFF00]/30 flex items-center justify-center text-3xl mx-auto shadow-glow-lime">
+            ⚡
+          </div>
+          <div>
+            <span className="text-xs font-mono font-bold text-[#CCFF00] uppercase tracking-wider">
+              {currentUser ? "YOU'RE ON THE SCENE BOARD" : '100% REAL GEN Z COMMUNITY'}
+            </span>
+            <h3 className="font-heading font-black text-2xl text-white mt-1">
+              {currentUser ? 'Waiting for Your Next Vibe Match' : 'The Scene Board is Fresh!'}
+            </h3>
+            <p className="text-xs sm:text-sm text-white/60 max-w-md mx-auto mt-2 leading-relaxed">
+              {currentUser
+                ? 'Your vibe frequencies are locked in. Share your 1080x1920 Story Card on Instagram or WhatsApp to invite friends to test their compatibility score with you!'
+                : 'No fake bot accounts or ghost profiles. Take 15 seconds to set your scene, tune your 3 vibe frequencies, and get matched with real people.'}
+            </p>
+          </div>
+
+          <div className="pt-2">
+            {!currentUser ? (
+              <button
+                onClick={() => {
+                  playUiSound('click');
+                  onOpenOnboarding();
+                }}
+                className="neo-btn-lime px-6 py-3 rounded-xl text-xs font-bold inline-flex items-center gap-2"
+              >
+                <span>⚡ Set My Scene (15s)</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  playUiSound('click');
+                  window.dispatchEvent(new CustomEvent('sceneon-open-storycard'));
+                }}
+                className="neo-btn-lime px-6 py-3 rounded-xl text-xs font-bold inline-flex items-center gap-2"
+              >
+                <span>📸 Share Story Card to Invite</span>
+              </button>
+            )}
+          </div>
         </div>
       )}
 

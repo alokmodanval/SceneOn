@@ -90,12 +90,18 @@ export function App() {
       loadData();
     };
 
+    const handleOpenStoryCard = () => {
+      setIsStoryCardOpen(true);
+    };
+
     window.addEventListener('sceneon-auth-change', handleAuthChange);
     window.addEventListener('sceneon-sync', handleDataSync);
+    window.addEventListener('sceneon-open-storycard', handleOpenStoryCard);
 
     return () => {
       window.removeEventListener('sceneon-auth-change', handleAuthChange);
       window.removeEventListener('sceneon-sync', handleDataSync);
+      window.removeEventListener('sceneon-open-storycard', handleOpenStoryCard);
     };
   }, []);
 
@@ -110,12 +116,9 @@ export function App() {
     return () => clearInterval(interval);
   }, [currentUser]);
 
-  // Online count calculation
-  const onlineCount = Math.max(
-    14,
-    peers.filter((p) => p.is_online && isFreshWithin24Hours(p.last_seen)).length +
-      (currentUser ? 1 : 0)
-  );
+  // Online count calculation (Real verified count)
+  const activePeersCount = peers.filter((p) => p.is_online && isFreshWithin24Hours(p.last_seen)).length;
+  const onlineCount = activePeersCount + (currentUser ? 1 : 0);
 
   return (
     <div className="min-h-screen bg-[#070709] text-white flex flex-col font-body selection:bg-[#CCFF00] selection:text-black">

@@ -138,23 +138,6 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
 
     const newMsg = await sendSceneMessage(chat.id, currentUser.id, text, msgType);
     setMessages((prev) => [...prev, newMsg]);
-
-    // Simulated responsive peer reply in mock/demo mode so user can test the 10-message unlock
-    if (messages.length < 10 && targetUser.id.startsWith('peer-')) {
-      setTimeout(async () => {
-        const peerReplies = [
-          `Haha honestly, that's such a valid point about "${targetUser.scene_prompt.slice(0, 25)}..."!`,
-          `No way, I literally experienced the exact same thing last week!`,
-          `Are you more into late night sprints or daytime focus?`,
-          `That is a crazy coincidence! What else do you usually vibe to?`,
-          `Valid! Drop a game card if you want to test our sync.`,
-          `Leveling up our trust bar! Almost unlocked 1-on-1 calls.`
-        ];
-        const randomReply = peerReplies[Math.floor(Math.random() * peerReplies.length)];
-        const autoMsg = await sendSceneMessage(chat.id, targetUser.id, randomReply, 'text');
-        setMessages((prev) => [...prev, autoMsg]);
-      }, 1200);
-    }
   };
 
   const handleDropSparkGame = () => {

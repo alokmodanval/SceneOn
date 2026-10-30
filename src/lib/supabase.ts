@@ -51,14 +51,25 @@ function setStored<T>(key: string, value: T): void {
   }
 }
 
-// Initialize seed data in localStorage if empty
+// Initialize seed data in localStorage if empty and purge legacy dummy characters
 export function initLocalStore() {
-  if (!localStorage.getItem(STORAGE_USERS_KEY)) {
-    setStored(STORAGE_USERS_KEY, INITIAL_PEERS);
-  }
-  if (!localStorage.getItem(STORAGE_ROOMS_KEY)) {
+  const existingUsers = getStored<SceneUser[]>(STORAGE_USERS_KEY, []);
+  // Purge any legacy dummy mock peers
+  const cleanUsers = existingUsers.filter(u => !u.id.startsWith('peer-'));
+  setStored(STORAGE_USERS_KEY, cleanUsers);
+
+  const existingRooms = getStored<SceneRoom[]>(STORAGE_ROOMS_KEY, []);
+  if (!existingRooms.length) {
     setStored(STORAGE_ROOMS_KEY, INITIAL_ROOMS);
+  } else {
+    // Purge fake mock participants from rooms
+    const cleanRooms = existingRooms.map(r => ({
+      ...r,
+      participants: (r.participants || []).filter(p => !p.id.startsWith('user-p'))
+    }));
+    setStored(STORAGE_ROOMS_KEY, cleanRooms);
   }
+
   if (!localStorage.getItem(STORAGE_CHATS_KEY)) {
     setStored(STORAGE_CHATS_KEY, []);
   }

@@ -60,7 +60,7 @@ export const Header: React.FC<HeaderProps> = ({
             </span>
             <Users className="w-3.5 h-3.5 text-[#CCFF00]" />
             <span className="text-white/80">
-              <strong className="text-white font-bold">{onlineCount}</strong> Gen Zs Scene On Right Now
+              <strong className="text-white font-bold">{onlineCount}</strong> {onlineCount === 1 ? 'Gen Z Online' : 'Gen Zs Scene On'}
             </span>
           </div>
         </div>
@@ -130,10 +130,11 @@ export const Header: React.FC<HeaderProps> = ({
                   playUiSound('click');
                   onOpenRestore();
                 }}
-                className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#111116] border border-white/15 hover:border-violet-500 text-xs font-mono text-white/80 hover:text-white transition-all"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#111116] border border-white/15 hover:border-violet-500 text-xs font-mono text-white/80 hover:text-white transition-all"
               >
                 <Key className="w-3.5 h-3.5 text-violet-400" />
-                <span>Restore Scene</span>
+                <span className="hidden sm:inline">Restore Scene</span>
+                <span className="sm:hidden">Restore</span>
               </button>
 
               {/* Set My Scene CTA */}
@@ -142,10 +143,11 @@ export const Header: React.FC<HeaderProps> = ({
                   playUiSound('click');
                   onOpenOnboarding();
                 }}
-                className="neo-btn-lime px-4 py-2 rounded-lg text-xs tracking-wide flex items-center gap-1.5"
+                className="neo-btn-lime px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg text-xs font-bold tracking-wide flex items-center gap-1.5 flex-shrink-0"
               >
-                <Sparkles className="w-3.5 h-3.5 fill-black" />
-                <span>⚡ Set My Scene (15s)</span>
+                <Sparkles className="w-3.5 h-3.5 fill-black flex-shrink-0" />
+                <span className="hidden sm:inline">⚡ Set My Scene (15s)</span>
+                <span className="sm:hidden">⚡ Set Scene</span>
               </button>
             </>
           )}
