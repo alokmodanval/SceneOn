@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Copy, Check, Key, Share2, Sparkles, SlidersHorizontal, Users } from 'lucide-react';
 import { SceneUser } from '../types';
 import { playUiSound } from '../lib/audioEngine';
+import { VibePlayer } from './VibePlayer';
 
 interface HeaderProps {
   currentUser: SceneUser | null;
@@ -66,7 +67,10 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Right Actions */}
-        <div className="flex items-center gap-2 sm:gap-3">
+        <div className="flex items-center gap-1.5 sm:gap-3">
+          {/* Chill Vibe Music Player */}
+          <VibePlayer />
+
           {currentUser ? (
             <>
               {/* Scene Key Backup Pill */}

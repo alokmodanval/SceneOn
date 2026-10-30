@@ -8,15 +8,30 @@ export function getAudioContext(): AudioContext {
     audioCtx = new AudioContextClass();
   }
   if (audioCtx.state === 'suspended') {
-    audioCtx.resume().catch(console.error);
+    audioCtx.resume().catch(() => {});
   }
   return audioCtx;
 }
 
+// Global user gesture unlocker for Mobile & Desktop browsers
+if (typeof window !== 'undefined') {
+  const unlockAudio = () => {
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(() => {});
+    }
+  };
+  window.addEventListener('click', unlockAudio, { passive: true });
+  window.addEventListener('touchstart', unlockAudio, { passive: true });
+  window.addEventListener('keydown', unlockAudio, { passive: true });
+}
+
 // ----------------- UI SOUND EFFECTS (SYNTHESIZED) -----------------
-export function playUiSound(type: 'click' | 'pop' | 'unlock' | 'kick' | 'reaction') {
+export function playUiSound(type: 'click' | 'pop' | 'unlock' | 'kick' | 'reaction' | 'chime') {
   try {
     const ctx = getAudioContext();
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
     const now = ctx.currentTime;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -25,55 +40,71 @@ export function playUiSound(type: 'click' | 'pop' | 'unlock' | 'kick' | 'reactio
     gain.connect(ctx.destination);
 
     if (type === 'click') {
+      // Crisp snappy neo-brutalist click
       osc.type = 'triangle';
-      osc.frequency.setValueAtTime(800, now);
-      osc.frequency.exponentialRampToValueAtTime(300, now + 0.04);
-      gain.gain.setValueAtTime(0.08, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
-      osc.start(now);
-      osc.stop(now + 0.04);
-    } else if (type === 'pop') {
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(400, now);
-      osc.frequency.exponentialRampToValueAtTime(880, now + 0.08);
+      osc.frequency.setValueAtTime(1200, now);
+      osc.frequency.exponentialRampToValueAtTime(320, now + 0.035);
       gain.gain.setValueAtTime(0.12, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.035);
       osc.start(now);
-      osc.stop(now + 0.08);
+      osc.stop(now + 0.035);
+    } else if (type === 'pop') {
+      // Bubbly pop for pills & buttons
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(350, now);
+      osc.frequency.exponentialRampToValueAtTime(920, now + 0.07);
+      gain.gain.setValueAtTime(0.14, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+      osc.start(now);
+      osc.stop(now + 0.07);
     } else if (type === 'unlock') {
-      // 3-note mini arpeggio
-      const notes = [523.25, 659.25, 783.99, 1046.50]; // C E G C
+      // Harmonic 4-note celebration arpeggio
+      const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6
       notes.forEach((freq, i) => {
         const o = ctx.createOscillator();
         const g = ctx.createGain();
         o.type = 'sine';
-        o.frequency.setValueAtTime(freq, now + i * 0.08);
-        g.gain.setValueAtTime(0.15, now + i * 0.08);
-        g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.08 + 0.25);
+        o.frequency.setValueAtTime(freq, now + i * 0.07);
+        g.gain.setValueAtTime(0.16, now + i * 0.07);
+        g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.07 + 0.28);
         o.connect(g);
         g.connect(ctx.destination);
-        o.start(now + i * 0.08);
-        o.stop(now + i * 0.08 + 0.25);
+        o.start(now + i * 0.07);
+        o.stop(now + i * 0.07 + 0.28);
+      });
+    } else if (type === 'chime') {
+      // Pleasant dual tone chime
+      [880, 1318.5].forEach((freq) => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(freq, now);
+        g.gain.setValueAtTime(0.1, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+        o.connect(g);
+        g.connect(ctx.destination);
+        o.start(now);
+        o.stop(now + 0.35);
       });
     } else if (type === 'reaction') {
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(600, now);
-      osc.frequency.exponentialRampToValueAtTime(1200, now + 0.12);
-      gain.gain.setValueAtTime(0.1, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+      osc.frequency.setValueAtTime(650, now);
+      osc.frequency.exponentialRampToValueAtTime(1300, now + 0.1);
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
       osc.start(now);
-      osc.stop(now + 0.12);
+      osc.stop(now + 0.1);
     } else if (type === 'kick') {
       osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(220, now);
-      osc.frequency.exponentialRampToValueAtTime(60, now + 0.2);
-      gain.gain.setValueAtTime(0.18, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+      osc.frequency.setValueAtTime(200, now);
+      osc.frequency.exponentialRampToValueAtTime(50, now + 0.22);
+      gain.gain.setValueAtTime(0.2, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
       osc.start(now);
-      osc.stop(now + 0.2);
+      osc.stop(now + 0.22);
     }
-  } catch (err) {
-    console.warn('Audio playback not permitted yet:', err);
+  } catch {
+    // Graceful silent fallback
   }
 }
 
@@ -94,7 +125,7 @@ export function createVoiceFilterPipeline(rawStream: MediaStream): VoiceFilterPi
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 256;
 
-  // Nodes for different filter modes
+  // Compressor
   const compressor = ctx.createDynamicsCompressor();
   compressor.threshold.setValueAtTime(-24, ctx.currentTime);
   compressor.knee.setValueAtTime(30, ctx.currentTime);
@@ -102,7 +133,7 @@ export function createVoiceFilterPipeline(rawStream: MediaStream): VoiceFilterPi
   compressor.attack.setValueAtTime(0.003, ctx.currentTime);
   compressor.release.setValueAtTime(0.25, ctx.currentTime);
 
-  // Filter 1: Low shelf / Lowpass for Deep Stealth
+  // Deep Stealth
   const deepFilter = ctx.createBiquadFilter();
   deepFilter.type = 'lowpass';
   deepFilter.frequency.setValueAtTime(1100, ctx.currentTime);
@@ -113,7 +144,7 @@ export function createVoiceFilterPipeline(rawStream: MediaStream): VoiceFilterPi
   bassBoost.frequency.setValueAtTime(250, ctx.currentTime);
   bassBoost.gain.setValueAtTime(8, ctx.currentTime);
 
-  // Filter 2: High shelf / Peaking for Helium / Soft
+  // Helium
   const heliumFilter = ctx.createBiquadFilter();
   heliumFilter.type = 'highpass';
   heliumFilter.frequency.setValueAtTime(350, ctx.currentTime);
@@ -124,13 +155,13 @@ export function createVoiceFilterPipeline(rawStream: MediaStream): VoiceFilterPi
   highBoost.gain.setValueAtTime(10, ctx.currentTime);
   highBoost.Q.setValueAtTime(1.5, ctx.currentTime);
 
-  // Filter 3: Telephone / Vintage Lo-Fi Radio bandpass
+  // Radio Bandpass
   const radioBandpass = ctx.createBiquadFilter();
   radioBandpass.type = 'bandpass';
   radioBandpass.frequency.setValueAtTime(1800, ctx.currentTime);
   radioBandpass.Q.setValueAtTime(1.2, ctx.currentTime);
 
-  // Waveshaper for subtle radio overdrive
+  // Distortion waveshaper
   const distortion = ctx.createWaveShaper();
   const n_samples = 44100;
   const curve = new Float32Array(n_samples);
@@ -143,39 +174,32 @@ export function createVoiceFilterPipeline(rawStream: MediaStream): VoiceFilterPi
   distortion.curve = curve;
   distortion.oversample = '4x';
 
-  // Gain nodes to switch active chain
   const naturalGain = ctx.createGain();
   const deepGain = ctx.createGain();
   const heliumGain = ctx.createGain();
   const radioGain = ctx.createGain();
 
-  // Natural Route: input -> naturalGain -> compressor
   inputNode.connect(naturalGain);
   naturalGain.connect(compressor);
 
-  // Deep Route: input -> deepFilter -> bassBoost -> deepGain -> compressor
   inputNode.connect(deepFilter);
   deepFilter.connect(bassBoost);
   bassBoost.connect(deepGain);
   deepGain.connect(compressor);
 
-  // Helium Route: input -> heliumFilter -> highBoost -> heliumGain -> compressor
   inputNode.connect(heliumFilter);
   heliumFilter.connect(highBoost);
   highBoost.connect(heliumGain);
   heliumGain.connect(compressor);
 
-  // Radio Route: input -> distortion -> radioBandpass -> radioGain -> compressor
   inputNode.connect(distortion);
   distortion.connect(radioBandpass);
   radioBandpass.connect(radioGain);
   radioGain.connect(compressor);
 
-  // Output stage: compressor -> analyser -> destination
   compressor.connect(analyser);
   compressor.connect(destination);
 
-  // Default mode: Natural
   function setMode(mode: VoiceFilterMode) {
     const now = ctx.currentTime;
     naturalGain.gain.setValueAtTime(mode === 'natural' ? 1 : 0, now);
@@ -201,9 +225,7 @@ export function createVoiceFilterPipeline(rawStream: MediaStream): VoiceFilterPi
         radioGain.disconnect();
         compressor.disconnect();
         analyser.disconnect();
-      } catch (e) {
-        // ignore
-      }
+      } catch {}
     },
   };
 }
@@ -227,7 +249,7 @@ export function createVolumeMeter(stream: MediaStream, onVolume: (level: number,
       sum += dataArray[i];
     }
     const avg = sum / bufferLength;
-    const normalized = Math.min(1, avg / 128); // 0 to 1
+    const normalized = Math.min(1, avg / 128);
     const isSpeaking = normalized > 0.12;
 
     onVolume(normalized, isSpeaking);
@@ -245,40 +267,126 @@ export function createVolumeMeter(stream: MediaStream, onVolume: (level: number,
   };
 }
 
-// ----------------- LOCAL AMBIENT SOUND SYNTHESIZER -----------------
-export type AmbientSoundType = 'none' | 'rain' | 'cafe' | 'lofi';
+// ----------------- GLOBAL BACKGROUND AMBIENT & LO-FI SYNTHESIZER -----------------
+export type AmbientSoundType = 'none' | 'lofi_beats' | 'rain' | 'cafe' | 'lofi';
 
 class AmbientSynthesizer {
   private activeType: AmbientSoundType = 'none';
   private masterGain: GainNode | null = null;
   private nodes: (AudioNode | number)[] = [];
+  private loopTimer: any = null;
 
-  public setAmbient(type: AmbientSoundType, volumePercent = 10) {
+  public setAmbient(type: AmbientSoundType, volumePercent = 14) {
     this.stop();
     this.activeType = type;
-    if (type === 'none') return;
+    if (type === 'none') {
+      this.notifyState();
+      return;
+    }
 
     try {
       const ctx = getAudioContext();
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
       this.masterGain = ctx.createGain();
-      const vol = Math.max(0.01, Math.min(0.25, volumePercent / 100));
+      const vol = Math.max(0.01, Math.min(0.3, volumePercent / 100));
       this.masterGain.gain.setValueAtTime(vol, ctx.currentTime);
       this.masterGain.connect(ctx.destination);
 
-      if (type === 'rain') {
+      if (type === 'lofi_beats') {
+        this.startLofiBeatsProgression(ctx, this.masterGain);
+      } else if (type === 'rain') {
         this.startRainSynth(ctx, this.masterGain);
       } else if (type === 'cafe') {
         this.startCafeSynth(ctx, this.masterGain);
       } else if (type === 'lofi') {
         this.startLofiDroneSynth(ctx, this.masterGain);
       }
+
+      this.notifyState();
     } catch (err) {
       console.warn('Ambient audio could not start:', err);
     }
   }
 
+  // Generative Lo-Fi Jazzy Chord Progression
+  private startLofiBeatsProgression(ctx: AudioContext, output: GainNode) {
+    // Add soft vinyl texture first
+    this.startCafeCrackleBed(ctx, output);
+
+    // Warm Rhodes style chords (Fmaj7 -> Em7 -> Dm7 -> Cmaj7)
+    const chordProgressions = [
+      [349.23, 440.00, 523.25, 659.25], // Fmaj7
+      [329.63, 392.00, 493.88, 587.33], // Em7
+      [293.66, 349.23, 440.00, 523.25], // Dm7
+      [261.63, 329.63, 392.00, 493.88], // Cmaj7
+    ];
+
+    let chordIndex = 0;
+    const playNextChord = () => {
+      if (this.activeType !== 'lofi_beats' || !this.masterGain) return;
+      const now = ctx.currentTime;
+      const chord = chordProgressions[chordIndex % chordProgressions.length];
+      chordIndex++;
+
+      chord.forEach((freq) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const filter = ctx.createBiquadFilter();
+
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, now);
+
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(950, now);
+
+        gain.gain.setValueAtTime(0.001, now);
+        gain.gain.linearRampToValueAtTime(0.18, now + 0.4);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 3.8);
+
+        osc.connect(filter);
+        filter.connect(gain);
+        gain.connect(output);
+
+        osc.start(now);
+        osc.stop(now + 3.8);
+        this.nodes.push(osc, filter, gain);
+      });
+
+      this.loopTimer = setTimeout(playNextChord, 3800);
+    };
+
+    playNextChord();
+  }
+
+  private startCafeCrackleBed(ctx: AudioContext, output: GainNode) {
+    const bufferSize = ctx.sampleRate * 2;
+    const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      if (Math.random() > 0.996) {
+        data[i] = (Math.random() * 2 - 1) * 0.25;
+      } else {
+        data[i] = (Math.random() * 2 - 1) * 0.015;
+      }
+    }
+    const noiseSource = ctx.createBufferSource();
+    noiseSource.buffer = noiseBuffer;
+    noiseSource.loop = true;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(1500, ctx.currentTime);
+    filter.Q.setValueAtTime(0.8, ctx.currentTime);
+
+    noiseSource.connect(filter);
+    filter.connect(output);
+    noiseSource.start();
+    this.nodes.push(noiseSource, filter);
+  }
+
   private startRainSynth(ctx: AudioContext, output: GainNode) {
-    // Generate pink noise buffer for realistic rain sound
     const bufferSize = ctx.sampleRate * 2;
     const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
     const outputData = noiseBuffer.getChannelData(0);
@@ -312,46 +420,19 @@ class AmbientSynthesizer {
   }
 
   private startCafeSynth(ctx: AudioContext, output: GainNode) {
-    // Soft vinyl crackle and distant cafe warmth
-    const bufferSize = ctx.sampleRate * 1.5;
-    const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    const data = noiseBuffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      // sparse random clicks
-      if (Math.random() > 0.994) {
-        data[i] = (Math.random() * 2 - 1) * 0.4;
-      } else {
-        data[i] = (Math.random() * 2 - 1) * 0.02;
-      }
-    }
-
-    const noiseSource = ctx.createBufferSource();
-    noiseSource.buffer = noiseBuffer;
-    noiseSource.loop = true;
-
-    const bandpass = ctx.createBiquadFilter();
-    bandpass.type = 'bandpass';
-    bandpass.frequency.setValueAtTime(1400, ctx.currentTime);
-    bandpass.Q.setValueAtTime(0.8, ctx.currentTime);
-
-    noiseSource.connect(bandpass);
-    bandpass.connect(output);
-    noiseSource.start();
-
-    this.nodes.push(noiseSource, bandpass);
+    this.startCafeCrackleBed(ctx, output);
   }
 
   private startLofiDroneSynth(ctx: AudioContext, output: GainNode) {
-    // 432 Hz and sub-harmonics for soothing drone
     const osc1 = ctx.createOscillator();
     const osc2 = ctx.createOscillator();
     const filter = ctx.createBiquadFilter();
 
     osc1.type = 'sine';
-    osc1.frequency.setValueAtTime(216, ctx.currentTime); // A3 root
+    osc1.frequency.setValueAtTime(216, ctx.currentTime); // A3
 
     osc2.type = 'triangle';
-    osc2.frequency.setValueAtTime(324, ctx.currentTime); // E4 5th interval
+    osc2.frequency.setValueAtTime(324, ctx.currentTime); // E4
 
     filter.type = 'lowpass';
     filter.frequency.setValueAtTime(450, ctx.currentTime);
@@ -372,12 +453,16 @@ class AmbientSynthesizer {
 
   public setVolume(volumePercent: number) {
     if (this.masterGain && audioCtx) {
-      const vol = Math.max(0.01, Math.min(0.25, volumePercent / 100));
+      const vol = Math.max(0.01, Math.min(0.3, volumePercent / 100));
       this.masterGain.gain.setValueAtTime(vol, audioCtx.currentTime);
     }
   }
 
   public stop() {
+    if (this.loopTimer) {
+      clearTimeout(this.loopTimer);
+      this.loopTimer = null;
+    }
     this.nodes.forEach((node) => {
       if (typeof node === 'object' && 'stop' in node && typeof (node as any).stop === 'function') {
         try {
@@ -398,10 +483,21 @@ class AmbientSynthesizer {
       this.masterGain = null;
     }
     this.activeType = 'none';
+    this.notifyState();
   }
 
   public getType(): AmbientSoundType {
     return this.activeType;
+  }
+
+  private notifyState() {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('friendsclub-ambient-change', {
+          detail: { type: this.activeType },
+        })
+      );
+    }
   }
 }
 

@@ -197,8 +197,8 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
   const sharedByMe = chat?.socials_shared?.[currentUser.id];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
-      <div className="relative w-full max-w-2xl bg-[#111116] border-2 border-[#CCFF00] rounded-3xl shadow-neo flex flex-col h-[90vh] max-h-[750px] overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
+      <div className="relative w-full max-w-2xl bg-[#111116] sm:border-2 sm:border-[#CCFF00] rounded-none sm:rounded-3xl shadow-neo flex flex-col h-[100dvh] sm:h-[88vh] sm:max-h-[750px] overflow-hidden">
         {/* Header */}
         <div className="px-5 py-4 border-b border-white/10 bg-[#0D0D12] flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">

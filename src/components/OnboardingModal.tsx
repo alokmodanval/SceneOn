@@ -138,8 +138,8 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
-      <div className="relative w-full max-w-xl bg-[#111116] border-2 border-[#CCFF00] rounded-2xl p-6 sm:p-8 shadow-neo max-h-[90vh] overflow-y-auto">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
+      <div className="relative w-full max-w-xl bg-[#111116] border-2 border-[#CCFF00] rounded-2xl p-5 sm:p-8 shadow-neo max-h-[92dvh] overflow-y-auto">
         {/* Close Button */}
         {currentUser && (
           <button
