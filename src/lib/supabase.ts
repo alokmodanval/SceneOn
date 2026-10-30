@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { SceneChat, SceneMessage, SceneRoom, SceneUser, UserSocials } from '../types';
 import { INITIAL_PEERS, INITIAL_ROOMS } from './mockData';
+import { getAIPersonaUsers, GROQ_API_KEY } from './groqEngine';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
@@ -80,18 +81,29 @@ export function initLocalStore() {
 
 // ----------------- USER HELPERS -----------------
 export async function fetchSceneUsers(): Promise<SceneUser[]> {
+  let users: SceneUser[] = [];
   if (isSupabaseConfigured && supabase) {
     const { data, error } = await supabase
       .from('scene_users')
       .select('*')
       .order('last_seen', { ascending: false });
     if (!error && data) {
-      return data;
+      users = data;
     }
+  } else {
+    initLocalStore();
+    users = getStored<SceneUser[]>(STORAGE_USERS_KEY, []);
   }
 
-  initLocalStore();
-  return getStored<SceneUser[]>(STORAGE_USERS_KEY, INITIAL_PEERS);
+  // If Groq AI personas are active, merge them on the board
+  if (GROQ_API_KEY) {
+    const aiUsers = getAIPersonaUsers();
+    const existingAiIds = new Set(users.map(u => u.id));
+    const toAdd = aiUsers.filter(a => !existingAiIds.has(a.id));
+    return [...toAdd, ...users];
+  }
+
+  return users;
 }
 
 export async function upsertSceneUser(user: SceneUser): Promise<SceneUser> {
@@ -136,6 +148,11 @@ export async function upsertSceneUser(user: SceneUser): Promise<SceneUser> {
 
 export async function getSceneUserByKey(key: string): Promise<SceneUser | null> {
   const cleanKey = key.trim().toUpperCase();
+  if (GROQ_API_KEY) {
+    const aiUser = getAIPersonaUsers().find(u => u.scene_key.toUpperCase() === cleanKey);
+    if (aiUser) return aiUser;
+  }
+
   if (isSupabaseConfigured && supabase) {
     const { data, error } = await supabase
       .from('scene_users')
@@ -147,12 +164,17 @@ export async function getSceneUserByKey(key: string): Promise<SceneUser | null> 
   }
 
   initLocalStore();
-  const allUsers = getStored<SceneUser[]>(STORAGE_USERS_KEY, INITIAL_PEERS);
+  const allUsers = getStored<SceneUser[]>(STORAGE_USERS_KEY, []);
   const found = allUsers.find(u => u.scene_key.toUpperCase() === cleanKey);
   return found || null;
 }
 
 export async function getSceneUserById(id: string): Promise<SceneUser | null> {
+  if (id.startsWith('ai-') && GROQ_API_KEY) {
+    const aiUser = getAIPersonaUsers().find(u => u.id === id);
+    if (aiUser) return aiUser;
+  }
+
   if (isSupabaseConfigured && supabase) {
     const { data, error } = await supabase
       .from('scene_users')
@@ -164,7 +186,7 @@ export async function getSceneUserById(id: string): Promise<SceneUser | null> {
   }
 
   initLocalStore();
-  const allUsers = getStored<SceneUser[]>(STORAGE_USERS_KEY, INITIAL_PEERS);
+  const allUsers = getStored<SceneUser[]>(STORAGE_USERS_KEY, []);
   return allUsers.find(u => u.id === id) || null;
 }
 

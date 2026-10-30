@@ -26,6 +26,7 @@ import {
 } from '../lib/supabase';
 import { playUiSound } from '../lib/audioEngine';
 import { DirectCallModal } from './DirectCallModal';
+import { generateGroqReply } from '../lib/groqEngine';
 
 interface OneOnOneChatModalProps {
   isOpen: boolean;
@@ -54,6 +55,7 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
   });
   const [isCalling, setIsCalling] = useState(false);
   const [hasTriggeredUnlockCelebration, setHasTriggeredUnlockCelebration] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -138,6 +140,30 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
 
     const newMsg = await sendSceneMessage(chat.id, currentUser.id, text, msgType);
     setMessages((prev) => [...prev, newMsg]);
+
+    // Realistic Groq AI human reply with delay and typing simulation
+    if (targetUser.id.startsWith('ai-')) {
+      const isFirstMsg = messages.length === 0;
+      const initialDelay = isFirstMsg ? 3000 : Math.floor(Math.random() * 4500 + 3000);
+
+      setTimeout(async () => {
+        setIsTyping(true);
+        const { text: aiReply } = await generateGroqReply(
+          targetUser.id,
+          [...messages, newMsg],
+          text
+        );
+
+        // Realistic typing duration based on reply length
+        const typingDuration = Math.min(4000, Math.max(1800, aiReply.length * 45));
+        setTimeout(async () => {
+          setIsTyping(false);
+          const aiMsg = await sendSceneMessage(chat.id, targetUser.id, aiReply, 'text');
+          setMessages((prev) => [...prev, aiMsg]);
+          playUiSound('pop');
+        }, typingDuration);
+      }, initialDelay);
+    }
   };
 
   const handleDropSparkGame = () => {
@@ -364,6 +390,20 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
               </div>
             );
           })}
+          {/* Animated Human-Like Typing Indicator */}
+          {isTyping && (
+            <div className="flex flex-col items-start animate-fadeIn">
+              <div className="px-4 py-2.5 rounded-2xl bg-[#15151c] border border-white/10 rounded-tl-none flex items-center gap-2">
+                <span className="text-xs font-mono text-white/50">{targetUser.alias} is typing</span>
+                <span className="flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#CCFF00] animate-bounce [animation-delay:-0.3s]"></span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#CCFF00] animate-bounce [animation-delay:-0.15s]"></span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#CCFF00] animate-bounce"></span>
+                </span>
+              </div>
+            </div>
+          )}
+
           <div ref={messagesEndRef} />
         </div>
 
