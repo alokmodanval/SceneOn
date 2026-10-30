@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+  body {
+    background-color: #070709;
+    color: #f3f4f6;
+    font-family: 'Plus Jakarta Sans', sans-serif;
+  }
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #070709;
+}
+::-webkit-scrollbar-thumb {
+  background: #23232c;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #CCFF00;
+}
+
+/* Cyber Glassmorphism */
+.glass-panel {
+  background: rgba(17, 17, 22, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-panel-elevated {
+  background: rgba(21, 21, 28, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(204, 255, 0, 0.2);
+}
+
+/* Neo Brutalist Button styles */
+.neo-btn-lime {
+  background: #CCFF00;
+  color: #070709;
+  font-weight: 700;
+  border: 2px solid #000;
+  box-shadow: 3px 3px 0px 0px #ffffff;
+  transition: all 0.15s ease-in-out;
+}
+.neo-btn-lime:hover:not(:disabled) {
+  transform: translate(-2px, -2px);
+  box-shadow: 5px 5px 0px 0px #ffffff;
+}
+.neo-btn-lime:active:not(:disabled) {
+  transform: translate(1px, 1px);
+  box-shadow: 2px 2px 0px 0px #ffffff;
+}
+
+.neo-btn-dark {
+  background: #111116;
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 3px 3px 0px 0px rgba(204, 255, 0, 0.5);
+  transition: all 0.15s ease-in-out;
+}
+.neo-btn-dark:hover:not(:disabled) {
+  transform: translate(-2px, -2px);
+  box-shadow: 5px 5px 0px 0px #CCFF00;
+  border-color: #CCFF00;
+}
+
+/* Range input custom styling */
+input[type=range] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: #1a1a24;
+  height: 8px;
+  border-radius: 4px;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #CCFF00;
+  cursor: pointer;
+  box-shadow: 0 0 10px rgba(204, 255, 0, 0.8);
+  border: 2px solid #070709;
+}

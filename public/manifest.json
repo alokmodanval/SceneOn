@@ -1,0 +1,17 @@
+{
+  "short_name": "SceneOn",
+  "name": "SceneOn — Aaj ka scene kya hai?",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "type": "image/svg+xml",
+      "sizes": "192x192 512x512"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#070709",
+  "theme_color": "#070709",
+  "display": "standalone",
+  "orientation": "portrait",
+  "description": "Zero-Login Vibe Matching, Creep-Free Chat & Live Voice Scenes for Gen Z."
+}
