@@ -1,6 +1,6 @@
 {
-  "short_name": "SceneOn",
-  "name": "SceneOn — Aaj ka scene kya hai?",
+  "short_name": "FriendsClub",
+  "name": "FriendsClub — Zero-Login Vibe Matching & Live Voice Pods",
   "icons": [
     {
       "src": "/favicon.svg",
@@ -13,5 +13,5 @@
   "theme_color": "#070709",
   "display": "standalone",
   "orientation": "portrait",
-  "description": "Zero-Login Vibe Matching, Creep-Free Chat & Live Voice Scenes for Gen Z."
+  "description": "Zero-Login Vibe Matching, Creep-Free Chat & Live Voice Pods for Gen Z."
 }

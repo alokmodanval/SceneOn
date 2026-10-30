@@ -20,7 +20,7 @@ export const StoryCardModal: React.FC<StoryCardModalProps> = ({
   const [isGenerating, setIsGenerating] = useState(true);
   const [copiedLink, setCopiedLink] = useState(false);
 
-  const inviteLink = `https://scene.tools4genz.com/?match=${currentUser.id}`;
+  const inviteLink = `https://friendsclub.tools4genz.com/?match=${currentUser.id}`;
 
   useEffect(() => {
     if (!isOpen) return;
@@ -52,7 +52,7 @@ export const StoryCardModal: React.FC<StoryCardModalProps> = ({
 
     const a = document.createElement('a');
     a.href = cardImage;
-    a.download = `SceneOn-${currentUser.alias}-StoryCard.png`;
+    a.download = `FriendsClub-${currentUser.alias}-StoryCard.png`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -161,7 +161,7 @@ export const StoryCardModal: React.FC<StoryCardModalProps> = ({
             <div className="flex items-center gap-3">
               <a
                 href={`https://api.whatsapp.com/send?text=${encodeURIComponent(
-                  `Aaj ka scene kya hai? Check our Scene Match % on SceneOn (Zero-Login): ${inviteLink}`
+                  `Aaj ka scene kya hai? Check our Vibe Match % on FriendsClub (Zero-Login): ${inviteLink}`
                 )}`}
                 target="_blank"
                 rel="noreferrer"
@@ -173,7 +173,7 @@ export const StoryCardModal: React.FC<StoryCardModalProps> = ({
 
               <a
                 href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(
-                  `Aaj ka scene kya hai? Drop in and check our vibe match on SceneOn: ${inviteLink} #SceneOn`
+                  `Aaj ka scene kya hai? Drop in and check our vibe match on FriendsClub: ${inviteLink} #FriendsClub`
                 )}`}
                 target="_blank"
                 rel="noreferrer"

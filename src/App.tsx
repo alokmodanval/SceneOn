@@ -288,7 +288,7 @@ export function App() {
       <footer className="border-t border-white/10 bg-[#070709] py-8 text-center text-xs font-mono text-white/50">
         <div className="max-w-7xl mx-auto px-4 space-y-2">
           <p className="text-white/80 font-bold">
-            SceneOn by <a href="https://tools4genz.com" target="_blank" rel="noreferrer" className="text-[#CCFF00] hover:underline">Tools4Genz</a> • Target Production: scene.tools4genz.com
+            FriendsClub by <a href="https://tools4genz.com" target="_blank" rel="noreferrer" className="text-[#CCFF00] hover:underline">Tools4Genz</a> • Target Production: friendsclub.tools4genz.com
           </p>
           <p className="text-white/40">
             100% Free Forever • Zero-Login Architecture • WebRTC Audio Mesh • Web Audio API Voice Filters

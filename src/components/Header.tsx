@@ -40,7 +40,7 @@ export const Header: React.FC<HeaderProps> = ({
             <div>
               <div className="flex items-center gap-1.5">
                 <span className="font-heading font-black text-2xl tracking-tight text-white">
-                  Scene<span className="text-[#CCFF00]">On</span>
+                  Friends<span className="text-[#CCFF00]">Club</span>
                 </span>
                 <span className="text-[10px] uppercase font-mono font-bold px-1.5 py-0.5 rounded bg-white/10 text-white/70">
                   Zero-Login

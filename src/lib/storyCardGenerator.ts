@@ -55,7 +55,7 @@ export async function generateStoryCardBlob(user: SceneUser): Promise<string> {
   // 5. Header Brand & Tagline
   ctx.fillStyle = '#CCFF00';
   ctx.font = 'bold 36px "Space Grotesk", sans-serif';
-  ctx.fillText('⚡ SCENEON', 130, 160);
+  ctx.fillText('⚡ FRIENDSCLUB', 130, 160);
 
   ctx.fillStyle = '#8B5CF6';
   ctx.font = 'bold 24px "JetBrains Mono", monospace';
@@ -231,7 +231,7 @@ export async function generateStoryCardBlob(user: SceneUser): Promise<string> {
 
   ctx.fillStyle = '#00F0FF';
   ctx.font = 'bold 26px "JetBrains Mono", monospace';
-  ctx.fillText(`scene.tools4genz.com/?match=${user.id.slice(0, 8)}`, 540, footerBoxY + 192);
+  ctx.fillText(`friendsclub.tools4genz.com/?match=${user.id.slice(0, 8)}`, 540, footerBoxY + 192);
 
   // 12. Bottom Tagline
   ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
