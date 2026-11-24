@@ -21,7 +21,7 @@ import {
   isSupabaseConfigured,
   upsertSceneUser,
 } from './lib/supabase';
-import { Radio, Users, Sparkles, Share2, Key } from 'lucide-react';
+import { Radio, Sparkles, Share2 } from 'lucide-react';
 import { playUiSound } from './lib/audioEngine';
 
 export function App() {
@@ -79,11 +79,29 @@ export function App() {
       // Check direct voice room deep link ?room=ROOM_ID
       const targetRoomId = params.get('room');
       if (targetRoomId) {
-        const targetRoom = fetchedRooms.find((r) => r.id === targetRoomId);
-        if (targetRoom) {
-          const pinParam = params.get('pin');
-          if (!targetRoom.is_private || targetRoom.room_pin === pinParam) {
-            setActiveRoom(targetRoom);
+        let targetRoom = fetchedRooms.find((r) => r.id === targetRoomId);
+        if (!targetRoom) {
+          // Dynamic room stub for direct invite links between devices
+          targetRoom = {
+            id: targetRoomId,
+            title: '🎙️ Live Voice Pod',
+            vibe_tag: '☕ Chai & Bakchodi',
+            participants: [],
+            max_users: 6,
+            active_topic: 'Aaj ka scene kya hai? Hop on mic!',
+            kick_votes: {},
+            created_at: new Date().toISOString(),
+            is_private: Boolean(params.get('pin')),
+            room_pin: params.get('pin') || undefined,
+          };
+          setRooms((prev) => [targetRoom!, ...prev]);
+        }
+
+        const pinParam = params.get('pin');
+        if (!targetRoom.is_private || targetRoom.room_pin === pinParam) {
+          setActiveRoom(targetRoom);
+          if (!getCurrentUser()) {
+            setIsOnboardingOpen(true);
           }
         }
       }

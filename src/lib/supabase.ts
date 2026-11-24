@@ -30,8 +30,25 @@ const STORAGE_CHATS_KEY = 'sceneon_all_chats';
 const STORAGE_MSGS_KEY = 'sceneon_all_messages';
 const STORAGE_AURA_VOTES = 'sceneon_aura_voted_pairs';
 
+// Cross-tab synchronization bus
+let tabSyncBus: BroadcastChannel | null = null;
+if (typeof window !== 'undefined') {
+  try {
+    tabSyncBus = new BroadcastChannel('friendsclub_sync_bus');
+    tabSyncBus.onmessage = (event) => {
+      if (event.data?.type) {
+        window.dispatchEvent(new CustomEvent('sceneon-sync', { detail: event.data }));
+      }
+    };
+  } catch {}
+}
+
 function notifyLocalChange(type: string, detail?: any) {
-  window.dispatchEvent(new CustomEvent('sceneon-sync', { detail: { type, ...detail } }));
+  const payload = { type, ...detail };
+  window.dispatchEvent(new CustomEvent('sceneon-sync', { detail: payload }));
+  try {
+    tabSyncBus?.postMessage(payload);
+  } catch {}
 }
 
 function getStored<T>(key: string, fallback: T): T {

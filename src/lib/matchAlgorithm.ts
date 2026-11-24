@@ -6,7 +6,6 @@ export function calculateSceneMatch(userA?: SceneUser | null, userB?: SceneUser 
   }
 
   // 1. Jaccard similarity on interest tags (60% weight)
-  const tagsA = new Set(userA.tags || []);
   const tagsB = new Set(userB.tags || []);
   
   const commonTags = (userA.tags || []).filter(tag => tagsB.has(tag));

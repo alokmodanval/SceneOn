@@ -1,5 +1,5 @@
 import React from 'react';
-import { Sparkles, Radio, ShieldCheck, Zap, Users, Flame, ArrowRight } from 'lucide-react';
+import { Radio, ShieldCheck, Zap, Users, Flame } from 'lucide-react';
 import { SceneUser } from '../types';
 import { playUiSound } from '../lib/audioEngine';
 

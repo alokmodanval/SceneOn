@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Mic, MicOff, PhoneOff, Radio } from 'lucide-react';
+import { Mic, MicOff, PhoneOff } from 'lucide-react';
 import { SceneUser } from '../types';
 import { createVolumeMeter, playUiSound } from '../lib/audioEngine';
 import { WebRTCMeshRoom } from '../lib/webrtcMesh';
@@ -51,9 +51,15 @@ export const DirectCallModal: React.FC<DirectCallModalProps> = ({
         });
         meterCleanupRef.current = cleanupMeter;
 
+        let remoteMeterCleanup: (() => void) | null = null;
         const callRoomId = `call_${chatId}`;
         const mesh = new WebRTCMeshRoom(callRoomId, currentUser.id, currentUser.alias, {
-          onRemoteStream: () => {},
+          onRemoteStream: (_peerId, remoteStream) => {
+            if (remoteMeterCleanup) remoteMeterCleanup();
+            remoteMeterCleanup = createVolumeMeter(remoteStream, (_level, isSpeaking) => {
+              setIsRemoteSpeaking(isSpeaking);
+            });
+          },
           onPeerLeave: () => {
             alert(`${targetUser.alias} left the call.`);
             onClose();

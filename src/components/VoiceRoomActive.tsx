@@ -280,6 +280,8 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
     };
   }, [room.id, currentUser.id, currentUser.alias]);
 
+  const toggleMicRef = useRef<(forceState?: boolean) => Promise<void>>(async () => {});
+
   // Spacebar Push-to-Talk
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -287,7 +289,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
       if (e.code === 'Space' && !e.repeat && isMuted && myRole !== 'listener') {
         e.preventDefault();
         setIsSpacePressed(true);
-        toggleMic(false);
+        toggleMicRef.current(false);
       }
     };
 
@@ -296,7 +298,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
       if (e.code === 'Space' && myRole !== 'listener') {
         e.preventDefault();
         setIsSpacePressed(false);
-        toggleMic(true);
+        toggleMicRef.current(true);
       }
     };
 
@@ -349,6 +351,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
       prev.map((p) => (p.id === currentUser.id ? { ...p, is_muted: nextState } : p))
     );
   };
+  toggleMicRef.current = toggleMic;
 
   // Change Voice Filter
   const handleFilterChange = (mode: VoiceFilterMode) => {

@@ -17,25 +17,33 @@ export const StoryCardModal: React.FC<StoryCardModalProps> = ({
   currentUser,
 }) => {
   const [cardImage, setCardImage] = useState<string | null>(null);
-  const [isGenerating, setIsGenerating] = useState(true);
+  const [isGenerating, setIsGenerating] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
 
   const inviteLink = `https://friendsclub.tools4genz.com/?match=${currentUser.id}`;
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      setCardImage(null);
+      return;
+    }
+    let isCancelled = false;
     setIsGenerating(true);
 
     generateStoryCardBlob(currentUser)
       .then((url) => {
-        setCardImage(url);
+        if (!isCancelled) setCardImage(url);
       })
       .catch((err) => {
         console.error('Failed to generate story card:', err);
       })
       .finally(() => {
-        setIsGenerating(false);
+        if (!isCancelled) setIsGenerating(false);
       });
+
+    return () => {
+      isCancelled = true;
+    };
   }, [isOpen, currentUser]);
 
   if (!isOpen) return null;

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Radio, Users, Plus, Lock, Globe, Key, X, ShieldAlert, Sparkles } from 'lucide-react';
+import { Radio, Users, Plus, Lock, Globe, Key, X } from 'lucide-react';
 import { SceneRoom, SceneUser } from '../types';
 import { playUiSound } from '../lib/audioEngine';
 

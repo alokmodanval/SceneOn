@@ -1,13 +1,5 @@
 import React, { useState } from 'react';
-import {
-  Sparkles,
-  MessageCircle,
-  Filter,
-  Check,
-  Flame,
-  Clock,
-  Zap,
-} from 'lucide-react';
+import { MessageCircle } from 'lucide-react';
 import { SceneUser } from '../types';
 import { calculateSceneMatch, getMatchBadgeStyle } from '../lib/matchAlgorithm';
 import { formatRelativeTime, isFreshWithin24Hours } from '../lib/identity';

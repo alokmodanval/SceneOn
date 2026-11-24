@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Radio, X, Sparkles, Lock, Globe, Key, Users, Flame, Dice5 } from 'lucide-react';
+import { Radio, X, Sparkles, Lock, Globe, Key, Users, Dice5 } from 'lucide-react';
 import { SceneRoom, SceneUser } from '../types';
 import { ALL_TAGS, TOPIC_DECK } from '../lib/constants';
 import { upsertSceneRoom } from '../lib/supabase';
