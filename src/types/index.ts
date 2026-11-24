@@ -103,3 +103,14 @@ export interface MatchScoreResult {
   sliderCloseness: number;   // 0 - 100%
   commonTags: string[];
 }
+
+export type SpeedDateStage = 'radar' | 'connecting' | 'in_call' | 'verdict' | 'matched' | 'passed';
+
+export interface SpeedDateSession {
+  sessionId: string;
+  partner: SceneUser;
+  maskedAlias: string;
+  maskedEmoji: string;
+  topic: string;
+  startedAt: number;
+}

@@ -102,3 +102,26 @@ export const TOPIC_DECK = [
   'What is the cringiest thing you did in 2020 lockdown?',
   'Android vs iOS: Does phone snobbery actually still matter in 2026?'
 ];
+
+export const SPEED_DATE_TOPICS = [
+  'Is ghosting ever justified, or is it pure emotional cowardice?',
+  'Are situationships just people wanting relationship benefits without accountability?',
+  'What is your biggest green flag that people rarely notice at first?',
+  'Would you delete Instagram permanently for ₹5 Lakhs cash right now?',
+  'Dating in college vs dating after placement: which one is more cooked?',
+  'Tell me your biggest ick that instantly turns you off.',
+  'If you could live in any year for 1 month, what year are you choosing?',
+  'What is the most chaotic late-night spontaneous plan you ever pulled off?',
+  'Do you believe in soulmates or do you think love is just mutual tolerance and vibe?'
+];
+
+export const MASKED_CODENAMES = [
+  { name: 'Mystic Falcon', emoji: '🦅', bg: 'from-amber-500 to-red-700' },
+  { name: 'Neon Chai', emoji: '☕', bg: 'from-emerald-500 to-teal-800' },
+  { name: 'Cyber Panda', emoji: '🐼', bg: 'from-violet-600 to-indigo-900' },
+  { name: 'Midnight Glitch', emoji: '⚡', bg: 'from-cyan-400 to-blue-800' },
+  { name: 'Cosmic LoFi', emoji: '🌙', bg: 'from-pink-500 to-purple-800' },
+  { name: 'Desi Samurai', emoji: '🗡️', bg: 'from-orange-500 to-amber-700' },
+  { name: 'Vibe Alchemist', emoji: '✨', bg: 'from-fuchsia-500 to-rose-700' },
+  { name: 'Shadow Hacker', emoji: '🕶️', bg: 'from-slate-600 to-zinc-900' },
+];

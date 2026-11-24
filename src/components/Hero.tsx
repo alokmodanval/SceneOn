@@ -1,5 +1,5 @@
 import React from 'react';
-import { Radio, ShieldCheck, Zap, Users, Flame } from 'lucide-react';
+import { Radio, ShieldCheck, Zap, Users, Flame, Heart } from 'lucide-react';
 import { SceneUser } from '../types';
 import { playUiSound } from '../lib/audioEngine';
 
@@ -7,12 +7,14 @@ interface HeroProps {
   currentUser: SceneUser | null;
   onOpenOnboarding: () => void;
   onSelectTab: (tab: 'voice' | 'matches') => void;
+  onOpenSpeedDate: () => void;
 }
 
 export const Hero: React.FC<HeroProps> = ({
   currentUser,
   onOpenOnboarding,
   onSelectTab,
+  onOpenSpeedDate,
 }) => {
   return (
     <div className="relative overflow-hidden pt-6 pb-8 sm:pt-12 sm:pb-14 text-center">
@@ -44,16 +46,28 @@ export const Hero: React.FC<HeroProps> = ({
 
         {/* CTAs */}
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
+          {/* 3-Min Blind Date Viral CTA */}
+          <button
+            onClick={() => {
+              playUiSound('pop');
+              onOpenSpeedDate();
+            }}
+            className="w-full sm:w-auto relative group px-7 py-3.5 rounded-2xl text-sm sm:text-base font-heading font-black text-black bg-gradient-to-r from-[#CCFF00] via-[#00F0FF] to-[#FF2E93] hover:scale-105 active:scale-95 transition-all shadow-neo flex items-center justify-center gap-2 border-2 border-black"
+          >
+            <Heart className="w-4 h-4 fill-black animate-bounce" />
+            <span>⚡ 3-Min Blind Voice Date (Free)</span>
+          </button>
+
           {!currentUser ? (
             <button
               onClick={() => {
                 playUiSound('click');
                 onOpenOnboarding();
               }}
-              className="w-full sm:w-auto neo-btn-lime px-7 py-3.5 rounded-2xl text-sm sm:text-base font-black flex items-center justify-center gap-2 shadow-neo"
+              className="w-full sm:w-auto neo-btn-dark px-6 py-3.5 rounded-2xl text-sm sm:text-base font-heading font-bold text-white flex items-center justify-center gap-2 border border-white/20"
             >
-              <Zap className="w-4 h-4 fill-black" />
-              <span>⚡ Set My Scene (15s)</span>
+              <Zap className="w-4 h-4 text-[#CCFF00]" />
+              <span>Set My Scene (15s)</span>
             </button>
           ) : (
             <button
@@ -61,10 +75,10 @@ export const Hero: React.FC<HeroProps> = ({
                 playUiSound('click');
                 onSelectTab('matches');
               }}
-              className="w-full sm:w-auto neo-btn-lime px-7 py-3.5 rounded-2xl text-sm sm:text-base font-black flex items-center justify-center gap-2 shadow-neo"
+              className="w-full sm:w-auto neo-btn-dark px-6 py-3.5 rounded-2xl text-sm sm:text-base font-heading font-bold text-white flex items-center justify-center gap-2 border border-white/20"
             >
-              <Flame className="w-4 h-4 fill-black" />
-              <span>Explore My Scene Matches</span>
+              <Flame className="w-4 h-4 text-[#CCFF00]" />
+              <span>Explore Matches</span>
             </button>
           )}
 
@@ -73,10 +87,10 @@ export const Hero: React.FC<HeroProps> = ({
               playUiSound('click');
               onSelectTab('voice');
             }}
-            className="w-full sm:w-auto neo-btn-dark px-6 py-3.5 rounded-2xl text-sm sm:text-base font-heading font-bold text-white flex items-center justify-center gap-2 border border-white/20"
+            className="w-full sm:w-auto px-5 py-3.5 rounded-2xl text-sm sm:text-base font-mono text-white/80 hover:text-white flex items-center justify-center gap-2 bg-[#111116] border border-white/10 hover:border-white/30 transition-all"
           >
             <Radio className="w-4 h-4 text-[#CCFF00]" />
-            <span>🔥 Check Live Scenes</span>
+            <span>Live Voice Pods</span>
           </button>
         </div>
 

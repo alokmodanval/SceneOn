@@ -12,6 +12,7 @@ import { HostRoomModal } from './components/HostRoomModal';
 import { OneOnOneChatModal } from './components/OneOnOneChatModal';
 import { VoiceRoomActive } from './components/VoiceRoomActive';
 import { ViralMatchBanner } from './components/ViralMatchBanner';
+import { SpeedDateModal } from './components/SpeedDateModal';
 import { SceneRoom, SceneUser } from './types';
 import { getCurrentUser, isFreshWithin24Hours, saveCurrentUser } from './lib/identity';
 import {
@@ -21,7 +22,7 @@ import {
   isSupabaseConfigured,
   upsertSceneUser,
 } from './lib/supabase';
-import { Radio, Sparkles, Share2 } from 'lucide-react';
+import { Radio, Sparkles, Share2, Heart } from 'lucide-react';
 import { playUiSound } from './lib/audioEngine';
 
 export function App() {
@@ -46,6 +47,7 @@ export function App() {
   const [isRestoreOpen, setIsRestoreOpen] = useState(false);
   const [isStoryCardOpen, setIsStoryCardOpen] = useState(false);
   const [isHostModalOpen, setIsHostModalOpen] = useState(false);
+  const [isSpeedDateOpen, setIsSpeedDateOpen] = useState(false);
 
   // Viral Invite state
   const [inviterUser, setInviterUser] = useState<SceneUser | null>(null);
@@ -169,6 +171,13 @@ export function App() {
         onOpenOnboarding={() => setIsOnboardingOpen(true)}
         onOpenRestore={() => setIsRestoreOpen(true)}
         onOpenStoryCard={() => setIsStoryCardOpen(true)}
+        onOpenSpeedDate={() => {
+          if (!currentUser) {
+            setIsOnboardingOpen(true);
+          } else {
+            setIsSpeedDateOpen(true);
+          }
+        }}
       />
 
       {/* Main Content Area */}
@@ -191,6 +200,13 @@ export function App() {
               currentUser={currentUser}
               onOpenOnboarding={() => setIsOnboardingOpen(true)}
               onSelectTab={(tab) => setActiveTab(tab)}
+              onOpenSpeedDate={() => {
+                if (!currentUser) {
+                  setIsOnboardingOpen(true);
+                } else {
+                  setIsSpeedDateOpen(true);
+                }
+              }}
             />
 
             {/* Hybrid Discovery Tabs Navigation */}
@@ -289,6 +305,22 @@ export function App() {
           <span>Matches</span>
         </button>
 
+        {/* 3-Min Blind Date Mobile Quick Button */}
+        <button
+          onClick={() => {
+            playUiSound('pop');
+            if (!currentUser) {
+              setIsOnboardingOpen(true);
+            } else {
+              setIsSpeedDateOpen(true);
+            }
+          }}
+          className="flex flex-col items-center gap-1 text-[11px] font-mono text-[#CCFF00] font-bold"
+        >
+          <Heart className="w-5 h-5 fill-[#CCFF00] animate-bounce" />
+          <span>Blind Date</span>
+        </button>
+
         {currentUser ? (
           <button
             onClick={() => {
@@ -372,6 +404,19 @@ export function App() {
           onClose={() => setChatTargetUser(null)}
           currentUser={currentUser}
           targetUser={chatTargetUser}
+        />
+      )}
+
+      {currentUser && (
+        <SpeedDateModal
+          isOpen={isSpeedDateOpen}
+          onClose={() => setIsSpeedDateOpen(false)}
+          currentUser={currentUser}
+          peers={peers}
+          onOpenChat={(partner) => {
+            setIsSpeedDateOpen(false);
+            setChatTargetUser(partner);
+          }}
         />
       )}
     </div>

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Copy, Check, Key, Share2, Sparkles, SlidersHorizontal, Users } from 'lucide-react';
+import { Copy, Check, Key, Share2, Sparkles, SlidersHorizontal, Users, Heart } from 'lucide-react';
 import { SceneUser } from '../types';
 import { playUiSound } from '../lib/audioEngine';
 import { VibePlayer } from './VibePlayer';
@@ -10,6 +10,7 @@ interface HeaderProps {
   onOpenOnboarding: () => void;
   onOpenRestore: () => void;
   onOpenStoryCard: () => void;
+  onOpenSpeedDate?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -18,6 +19,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenOnboarding,
   onOpenRestore,
   onOpenStoryCard,
+  onOpenSpeedDate,
 }) => {
   const [copiedKey, setCopiedKey] = useState(false);
 
@@ -68,6 +70,21 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right Actions */}
         <div className="flex items-center gap-1.5 sm:gap-3">
+          {/* Quick Speed Date CTA Pill */}
+          {onOpenSpeedDate && (
+            <button
+              onClick={() => {
+                playUiSound('pop');
+                onOpenSpeedDate();
+              }}
+              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-pink-500/15 to-[#CCFF00]/15 border border-pink-500/30 hover:border-[#CCFF00] text-xs font-heading font-black text-pink-300 hover:text-white transition-all shadow-sm"
+              title="⚡ 3-Minute Anonymous Blind Voice Date (Free)"
+            >
+              <Heart className="w-3.5 h-3.5 fill-pink-500 text-pink-500 animate-pulse" />
+              <span>3-Min Blind Date</span>
+            </button>
+          )}
+
           {/* Chill Vibe Music Player */}
           <VibePlayer />
 
