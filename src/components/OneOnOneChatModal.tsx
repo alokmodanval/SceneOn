@@ -27,6 +27,7 @@ import {
 import { playUiSound } from '../lib/audioEngine';
 import { DirectCallModal } from './DirectCallModal';
 import { generateGroqReply } from '../lib/groqEngine';
+import { buildWsUrl } from '../lib/backendConfig';
 
 interface OneOnOneChatModalProps {
   isOpen: boolean;
@@ -77,6 +78,7 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
     if (!isOpen) return;
 
     let isMounted = true;
+    let dmSocket: WebSocket | null = null;
     chatIdRef.current = null;
     prevCountRef.current = null;
     hasCelebratedRef.current = false;
@@ -102,6 +104,54 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
         }
         setMessages(msgs);
       });
+
+      // Open live Durable Object WebSocket for cross-device instant DM delivery
+      if (!targetUser.id.startsWith('ai-')) {
+        try {
+          dmSocket = new WebSocket(
+            buildWsUrl(`/ws/room/${encodeURIComponent(`chat_${c.id}`)}`, {
+              userId: currentUser.id,
+              alias: currentUser.alias,
+              mode: 'dm',
+            })
+          );
+          dmSocket.onmessage = (evt) => {
+            if (!isMounted) return;
+            try {
+              const payload = JSON.parse(String(evt.data)) as {
+                type?: string;
+                chatId?: string;
+                message?: SceneMessage;
+                userId?: string;
+                socials?: UserSocials;
+              };
+              if (payload.type === 'dm_message' && payload.message && payload.chatId === c.id) {
+                const incoming = payload.message;
+                setMessages((prev) => (prev.some((m) => m.id === incoming.id) ? prev : [...prev, incoming]));
+              }
+              if (payload.type === 'dm_socials' && payload.chatId === c.id && payload.userId && payload.socials) {
+                const uid = payload.userId;
+                const soc = payload.socials;
+                setChat((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        socials_shared: {
+                          ...(prev.socials_shared || {}),
+                          [uid]: soc,
+                        },
+                      }
+                    : prev
+                );
+              }
+            } catch {
+              // Ignore malformed socket message
+            }
+          };
+        } catch {
+          // Local/offline mode skips socket gracefully
+        }
+      }
     });
 
     const handleSync = (e: Event) => {
@@ -130,12 +180,19 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
     window.addEventListener('sceneon-sync', handleSync);
     return () => {
       isMounted = false;
+      if (dmSocket) {
+        try {
+          dmSocket.close();
+        } catch {
+          // Ignore close error
+        }
+      }
       if (aiDelayTimerRef.current) clearTimeout(aiDelayTimerRef.current);
       if (aiTypingTimerRef.current) clearTimeout(aiTypingTimerRef.current);
       if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
       window.removeEventListener('sceneon-sync', handleSync);
     };
-  }, [isOpen, currentUser.id, targetUser.id]);
+  }, [isOpen, currentUser.id, currentUser.alias, targetUser.id]);
 
   // Scroll to bottom on message updates
   useEffect(() => {

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Radio, Users, Plus, Lock, Globe, Key, X } from 'lucide-react';
 import { SceneRoom, SceneUser } from '../types';
 import { playUiSound } from '../lib/audioEngine';
+import { verifyRoomPin } from '../lib/supabase';
 
 interface LiveVoiceRoomsProps {
   rooms: SceneRoom[];
@@ -22,6 +23,7 @@ export const LiveVoiceRooms: React.FC<LiveVoiceRoomsProps> = ({
   const [pinPromptRoom, setPinPromptRoom] = useState<SceneRoom | null>(null);
   const [enteredPin, setEnteredPin] = useState('');
   const [pinError, setPinError] = useState('');
+  const [verifyingPin, setVerifyingPin] = useState(false);
 
   const handleJoinClick = (room: SceneRoom) => {
     playUiSound('click');
@@ -31,7 +33,7 @@ export const LiveVoiceRooms: React.FC<LiveVoiceRoomsProps> = ({
     }
 
     // Check if room is private
-    if (room.is_private && room.host_id !== currentUser.id) {
+    if ((room.is_private || room.has_pin) && room.host_id !== currentUser.id) {
       setPinPromptRoom(room);
       setEnteredPin('');
       setPinError('');
@@ -41,11 +43,15 @@ export const LiveVoiceRooms: React.FC<LiveVoiceRoomsProps> = ({
     onJoinRoom(room);
   };
 
-  const handleVerifyPinAndJoin = (e: React.FormEvent) => {
+  const handleVerifyPinAndJoin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!pinPromptRoom) return;
+    if (!pinPromptRoom || verifyingPin) return;
 
-    if (pinPromptRoom.room_pin && enteredPin.trim() !== pinPromptRoom.room_pin.trim()) {
+    setVerifyingPin(true);
+    const isValid = await verifyRoomPin(pinPromptRoom, enteredPin);
+    setVerifyingPin(false);
+
+    if (!isValid) {
       playUiSound('pop');
       setPinError('Incorrect 4-digit PIN! Ask the host for the code.');
       return;
@@ -340,10 +346,10 @@ export const LiveVoiceRooms: React.FC<LiveVoiceRoomsProps> = ({
 
               <button
                 type="submit"
-                disabled={enteredPin.length < 4}
+                disabled={enteredPin.length < 4 || verifyingPin}
                 className="w-full py-3 rounded-2xl bg-violet-500 hover:bg-violet-400 disabled:opacity-40 text-white font-heading font-bold text-sm shadow-neo-violet transition-all"
               >
-                🔓 Unlock & Join Table
+                {verifyingPin ? 'Checking PIN...' : '🔓 Unlock & Join Table'}
               </button>
             </form>
           </div>

@@ -66,6 +66,7 @@ export interface SceneRoom {
   created_at: string;
   is_private?: boolean;
   room_pin?: string; // 4-digit code e.g. "1234"
+  has_pin?: boolean;
   host_id?: string;
   locked_seats?: number[]; // array of locked seat numbers e.g. [3, 4]
 }
@@ -113,4 +114,48 @@ export interface SpeedDateSession {
   maskedEmoji: string;
   topic: string;
   startedAt: number;
+}
+
+export interface ChessPlayerInfo {
+  id: string;
+  alias: string;
+  avatar: UserAvatar;
+}
+
+export interface ChessMoveSummary {
+  from: string;
+  to: string;
+  san: string;
+}
+
+export interface ChessGameState {
+  fen: string;
+  pgn: string;
+  status: 'waiting' | 'active' | 'checkmate' | 'draw' | 'resigned' | 'timeout';
+  winner: 'w' | 'b' | 'draw' | null;
+  turn: 'w' | 'b';
+  white: ChessPlayerInfo | null;
+  black: ChessPlayerInfo | null;
+  timeControlMs: number;
+  whiteTimeMs: number;
+  blackTimeMs: number;
+  lastMoveAt: number | null;
+  lastMove: ChessMoveSummary | null;
+  drawOfferBy: 'w' | 'b' | null;
+  moveCount: number;
+}
+
+export interface SpeedMatchedPayload {
+  sessionId: string;
+  partner: SceneUser;
+  maskedAlias: string;
+  maskedEmoji: string;
+  topic: string;
+}
+
+export interface ChessMatchedPayload {
+  gameId: string;
+  color: 'w' | 'b';
+  timeControlMs: number;
+  opponent: ChessPlayerInfo;
 }

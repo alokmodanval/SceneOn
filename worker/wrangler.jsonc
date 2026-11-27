@@ -1,0 +1,46 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "friendsclub-realtime",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.05
+    }
+  },
+  "vars": {
+    "ALLOWED_ORIGIN": "https://friendsclub.tools4genz.com"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "friendsclub-db",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "LOBBY_HUB",
+        "class_name": "LobbyHub"
+      },
+      {
+        "name": "ROOM_RELAY",
+        "class_name": "RoomRelay"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["LobbyHub", "RoomRelay"]
+    }
+  ]
+}

@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import { SceneChat, SceneMessage, SceneRoom, SceneUser, UserSocials } from '../types';
 import { INITIAL_ROOMS } from './mockData';
 import { AI_PERSONAS_ENABLED, getAIPersonaUsers } from './groqEngine';
+import { buildApiUrl } from './backendConfig';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
@@ -23,7 +24,7 @@ export const supabase = isSupabaseConfigured
     })
   : null;
 
-// Local fallback store keys
+// Local fallback & offline cache keys
 const STORAGE_USERS_KEY = 'sceneon_all_users';
 const STORAGE_ROOMS_KEY = 'sceneon_all_rooms';
 const STORAGE_CHATS_KEY = 'sceneon_all_chats';
@@ -80,6 +81,25 @@ function sanitizeHandle(value: string | undefined): string | undefined {
   return cleaned || undefined;
 }
 
+async function d1FetchJson<T>(path: string, init?: RequestInit): Promise<T | null> {
+  if (typeof fetch === 'undefined') return null;
+  try {
+    const res = await fetch(buildApiUrl(path), {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init?.headers || {}),
+      },
+    });
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) return null;
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
 // Initialize seed data in localStorage if empty and purge legacy dummy characters
 export function initLocalStore() {
   const existingUsers = getStored<SceneUser[]>(STORAGE_USERS_KEY, []);
@@ -105,8 +125,25 @@ export function initLocalStore() {
   }
 }
 
+function mergeAIPersonas(users: SceneUser[]): SceneUser[] {
+  if (!AI_PERSONAS_ENABLED) return users;
+  const aiAuraMap = getStored<Record<string, number>>(STORAGE_AI_AURA_KEY, {});
+  const aiUsers = getAIPersonaUsers().map((a) => ({
+    ...a,
+    scene_aura: aiAuraMap[a.id] ?? a.scene_aura,
+  }));
+  const existingIds = new Set(users.map((u) => u.id));
+  const toAdd = aiUsers.filter((a) => !existingIds.has(a.id));
+  return [...toAdd, ...users];
+}
+
 // ----------------- USER HELPERS -----------------
 export async function fetchSceneUsers(): Promise<SceneUser[]> {
+  const remote = await d1FetchJson<{ users?: SceneUser[] }>('/api/users');
+  if (remote?.users) {
+    return mergeAIPersonas(remote.users);
+  }
+
   let users: SceneUser[] = [];
   if (isSupabaseConfigured && supabase) {
     const { data, error } = await supabase
@@ -121,18 +158,7 @@ export async function fetchSceneUsers(): Promise<SceneUser[]> {
     users = getStored<SceneUser[]>(STORAGE_USERS_KEY, []);
   }
 
-  if (AI_PERSONAS_ENABLED) {
-    const aiAuraMap = getStored<Record<string, number>>(STORAGE_AI_AURA_KEY, {});
-    const aiUsers = getAIPersonaUsers().map((a) => ({
-      ...a,
-      scene_aura: aiAuraMap[a.id] ?? a.scene_aura,
-    }));
-    const existingAiIds = new Set(users.map((u) => u.id));
-    const toAdd = aiUsers.filter((a) => !existingAiIds.has(a.id));
-    return [...toAdd, ...users];
-  }
-
-  return users;
+  return mergeAIPersonas(users);
 }
 
 export async function upsertSceneUser(user: SceneUser): Promise<SceneUser> {
@@ -144,7 +170,12 @@ export async function upsertSceneUser(user: SceneUser): Promise<SceneUser> {
     last_seen: new Date().toISOString(),
   };
 
-  if (isSupabaseConfigured && supabase) {
+  const remote = await d1FetchJson<{ user?: SceneUser }>('/api/users', {
+    method: 'POST',
+    body: JSON.stringify(safeUser),
+  });
+
+  if (!remote?.user && isSupabaseConfigured && supabase) {
     const { data, error } = await supabase
       .from('scene_users')
       .upsert({
@@ -167,20 +198,21 @@ export async function upsertSceneUser(user: SceneUser): Promise<SceneUser> {
     }
   }
 
+  const savedUser = remote?.user || safeUser;
   initLocalStore();
   const allUsers = getStored<SceneUser[]>(STORAGE_USERS_KEY, []);
   const existingIdx = allUsers.findIndex(
-    (u) => u.id === safeUser.id || u.scene_key === safeUser.scene_key
+    (u) => u.id === savedUser.id || u.scene_key === savedUser.scene_key
   );
 
   if (existingIdx >= 0) {
-    allUsers[existingIdx] = safeUser;
+    allUsers[existingIdx] = savedUser;
   } else {
-    allUsers.unshift(safeUser);
+    allUsers.unshift(savedUser);
   }
   setStored(STORAGE_USERS_KEY, allUsers);
-  notifyLocalChange('users_updated', { user: safeUser });
-  return safeUser;
+  notifyLocalChange('users_updated', { user: savedUser });
+  return savedUser;
 }
 
 export async function getSceneUserByKey(key: string): Promise<SceneUser | null> {
@@ -191,6 +223,11 @@ export async function getSceneUserByKey(key: string): Promise<SceneUser | null> 
     const aiUser = getAIPersonaUsers().find((u) => u.scene_key.toUpperCase() === cleanKey);
     if (aiUser) return aiUser;
   }
+
+  const remote = await d1FetchJson<{ user?: SceneUser | null }>(
+    `/api/users/key/${encodeURIComponent(cleanKey)}`
+  );
+  if (remote?.user) return remote.user;
 
   if (isSupabaseConfigured && supabase) {
     const { data, error } = await supabase
@@ -204,8 +241,7 @@ export async function getSceneUserByKey(key: string): Promise<SceneUser | null> 
 
   initLocalStore();
   const allUsers = getStored<SceneUser[]>(STORAGE_USERS_KEY, []);
-  const found = allUsers.find((u) => u.scene_key.toUpperCase() === cleanKey);
-  return found || null;
+  return allUsers.find((u) => u.scene_key.toUpperCase() === cleanKey) || null;
 }
 
 export async function getSceneUserById(id: string): Promise<SceneUser | null> {
@@ -216,6 +252,11 @@ export async function getSceneUserById(id: string): Promise<SceneUser | null> {
       return { ...aiUser, scene_aura: aiAuraMap[aiUser.id] ?? aiUser.scene_aura };
     }
   }
+
+  const remote = await d1FetchJson<{ user?: SceneUser | null }>(
+    `/api/users/${encodeURIComponent(id)}`
+  );
+  if (remote?.user) return remote.user;
 
   if (isSupabaseConfigured && supabase) {
     const { data, error } = await supabase
@@ -233,7 +274,11 @@ export async function getSceneUserById(id: string): Promise<SceneUser | null> {
 }
 
 // ----------------- ROOMS HELPERS -----------------
-export async function fetchSceneRooms(): Promise<SceneRoom[]> {
+export async function fetchSceneRooms(currentUserId?: string): Promise<SceneRoom[]> {
+  const query = currentUserId ? `?userId=${encodeURIComponent(currentUserId)}` : '';
+  const remote = await d1FetchJson<{ rooms?: SceneRoom[] }>(`/api/rooms${query}`);
+  if (remote?.rooms) return remote.rooms;
+
   if (isSupabaseConfigured && supabase) {
     const { data, error } = await supabase
       .from('scene_rooms')
@@ -254,7 +299,13 @@ export async function upsertSceneRoom(room: SceneRoom): Promise<SceneRoom> {
     active_topic: room.active_topic.trim().slice(0, 140),
   };
 
-  if (isSupabaseConfigured && supabase) {
+  const remote = await d1FetchJson<{ room?: SceneRoom }>('/api/rooms', {
+    method: 'POST',
+    body: JSON.stringify(safeRoom),
+  });
+  const savedRoom = remote?.room || safeRoom;
+
+  if (!remote?.room && isSupabaseConfigured && supabase) {
     const { data, error } = await supabase
       .from('scene_rooms')
       .upsert(safeRoom)
@@ -266,20 +317,47 @@ export async function upsertSceneRoom(room: SceneRoom): Promise<SceneRoom> {
 
   initLocalStore();
   const allRooms = getStored<SceneRoom[]>(STORAGE_ROOMS_KEY, INITIAL_ROOMS);
-  const idx = allRooms.findIndex((r) => r.id === safeRoom.id);
+  const idx = allRooms.findIndex((r) => r.id === savedRoom.id);
   if (idx >= 0) {
-    allRooms[idx] = safeRoom;
+    allRooms[idx] = savedRoom;
   } else {
-    allRooms.unshift(safeRoom);
+    allRooms.unshift(savedRoom);
   }
   setStored(STORAGE_ROOMS_KEY, allRooms);
-  notifyLocalChange('room_updated', { room: safeRoom });
-  return safeRoom;
+  notifyLocalChange('room_updated', { room: savedRoom });
+  return savedRoom;
+}
+
+export async function verifyRoomPin(room: SceneRoom, pin: string): Promise<boolean> {
+  const cleanPin = pin.trim();
+  if (!room.is_private) return true;
+
+  const remote = await d1FetchJson<{ valid?: boolean }>(
+    `/api/rooms/${encodeURIComponent(room.id)}/verify-pin`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ pin: cleanPin }),
+    }
+  );
+  if (remote && typeof remote.valid === 'boolean') {
+    return remote.valid;
+  }
+
+  if (room.room_pin) {
+    return cleanPin === room.room_pin.trim();
+  }
+  return false;
 }
 
 // ----------------- CHATS & MESSAGES HELPERS -----------------
 export async function getOrCreateChat(user1Id: string, user2Id: string): Promise<SceneChat> {
   const [firstId, secondId] = [user1Id, user2Id].sort();
+
+  const remote = await d1FetchJson<{ chat?: SceneChat }>('/api/chats', {
+    method: 'POST',
+    body: JSON.stringify({ user1Id: firstId, user2Id: secondId }),
+  });
+  if (remote?.chat) return remote.chat;
 
   if (isSupabaseConfigured && supabase) {
     const { data: existing } = await supabase
@@ -328,6 +406,11 @@ export async function getOrCreateChat(user1Id: string, user2Id: string): Promise
 }
 
 export async function fetchSceneMessages(chatId: string): Promise<SceneMessage[]> {
+  const remote = await d1FetchJson<{ messages?: SceneMessage[] }>(
+    `/api/chats/${encodeURIComponent(chatId)}/messages`
+  );
+  if (remote?.messages) return remote.messages;
+
   if (isSupabaseConfigured && supabase) {
     const { data, error } = await supabase
       .from('scene_messages')
@@ -350,7 +433,16 @@ export async function sendSceneMessage(
   msgType: 'text' | 'game_card' | 'system' = 'text'
 ): Promise<SceneMessage> {
   const cleanBody = body.trim().slice(0, 1000);
-  const newMsg: SceneMessage = {
+
+  const remote = await d1FetchJson<{ message?: SceneMessage }>(
+    `/api/chats/${encodeURIComponent(chatId)}/messages`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ senderId, body: cleanBody, msgType }),
+    }
+  );
+
+  const savedMsg: SceneMessage = remote?.message || {
     id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
     chat_id: chatId,
     sender_id: senderId,
@@ -359,7 +451,7 @@ export async function sendSceneMessage(
     created_at: new Date().toISOString(),
   };
 
-  if (isSupabaseConfigured && supabase) {
+  if (!remote?.message && isSupabaseConfigured && supabase) {
     await supabase.from('scene_messages').insert({
       chat_id: chatId,
       sender_id: senderId,
@@ -379,8 +471,10 @@ export async function sendSceneMessage(
 
   initLocalStore();
   const allMsgs = getStored<SceneMessage[]>(STORAGE_MSGS_KEY, []);
-  allMsgs.push(newMsg);
-  setStored(STORAGE_MSGS_KEY, allMsgs);
+  if (!allMsgs.some((m) => m.id === savedMsg.id)) {
+    allMsgs.push(savedMsg);
+    setStored(STORAGE_MSGS_KEY, allMsgs);
+  }
 
   const allChats = getStored<SceneChat[]>(STORAGE_CHATS_KEY, []);
   const chatIdx = allChats.findIndex((c) => c.id === chatId);
@@ -393,8 +487,8 @@ export async function sendSceneMessage(
     setStored(STORAGE_CHATS_KEY, allChats);
   }
 
-  notifyLocalChange('new_message', { message: newMsg, chatId });
-  return newMsg;
+  notifyLocalChange('new_message', { message: savedMsg, chatId });
+  return savedMsg;
 }
 
 export async function updateChatSocials(
@@ -408,7 +502,16 @@ export async function updateChatSocials(
     github: sanitizeHandle(socials.github),
   };
 
-  if (isSupabaseConfigured && supabase) {
+  const remote = await d1FetchJson<{ socials?: UserSocials }>(
+    `/api/chats/${encodeURIComponent(chatId)}/socials`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ userId, socials: safeSocials }),
+    }
+  );
+  const resolvedSocials = remote?.socials || safeSocials;
+
+  if (!remote?.socials && isSupabaseConfigured && supabase) {
     const { data: chat } = await supabase.from('scene_chats').select('*').eq('id', chatId).single();
     if (chat) {
       const updatedSocials = { ...chat.socials_shared, [userId]: safeSocials };
@@ -422,12 +525,12 @@ export async function updateChatSocials(
   if (chatIdx >= 0) {
     allChats[chatIdx].socials_shared = {
       ...(allChats[chatIdx].socials_shared || {}),
-      [userId]: safeSocials,
+      [userId]: resolvedSocials,
     };
     setStored(STORAGE_CHATS_KEY, allChats);
-    notifyLocalChange('socials_updated', { chatId, userId, socials: safeSocials });
+    notifyLocalChange('socials_updated', { chatId, userId, socials: resolvedSocials });
   }
-  return safeSocials;
+  return resolvedSocials;
 }
 
 // ----------------- AURA VOTING -----------------
@@ -440,14 +543,35 @@ export async function voteAura(
     return { success: false, message: 'You cannot vote on your own aura!' };
   }
 
-  // Strictly restrict allowed aura deltas (+1 W Scene or -2 L Creep)
   const safeDelta = delta > 0 ? 1 : -2;
-
   const votedPairs = getStored<string[]>(STORAGE_AURA_VOTES, []);
   const pairKey = `${voterUserId}->${targetUserId}`;
 
   if (votedPairs.includes(pairKey)) {
     return { success: false, message: 'You have already voted on this user’s aura!' };
+  }
+
+  const remote = await d1FetchJson<{ success?: boolean; newAura?: number; message?: string }>(
+    '/api/aura',
+    {
+      method: 'POST',
+      body: JSON.stringify({ targetUserId, voterUserId, delta: safeDelta }),
+    }
+  );
+
+  if (remote && typeof remote.success === 'boolean') {
+    if (!remote.success) {
+      return { success: false, message: remote.message || 'Already voted.' };
+    }
+    if (targetUserId.startsWith('ai-') && typeof remote.newAura === 'number') {
+      const aiAuraMap = getStored<Record<string, number>>(STORAGE_AI_AURA_KEY, {});
+      aiAuraMap[targetUserId] = remote.newAura;
+      setStored(STORAGE_AI_AURA_KEY, aiAuraMap);
+    }
+    votedPairs.push(pairKey);
+    setStored(STORAGE_AURA_VOTES, votedPairs);
+    notifyLocalChange('aura_voted', { targetUserId, newAura: remote.newAura });
+    return { success: true, newAura: remote.newAura };
   }
 
   let updatedAura: number | undefined;

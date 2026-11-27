@@ -11,6 +11,7 @@ import { OneOnOneChatModal } from './components/OneOnOneChatModal';
 import { VoiceRoomActive } from './components/VoiceRoomActive';
 import { ViralMatchBanner } from './components/ViralMatchBanner';
 import { SpeedDateModal } from './components/SpeedDateModal';
+import { ChessArena } from './components/ChessArena';
 import { SceneRoom, SceneUser } from './types';
 import { getCurrentUser, isFreshWithin24Hours, saveCurrentUser } from './lib/identity';
 import {
@@ -21,7 +22,9 @@ import {
   upsertSceneRoom,
   upsertSceneUser,
 } from './lib/supabase';
-import { Radio, Sparkles, Share2, Heart } from 'lucide-react';
+import { lobbySocket } from './lib/lobbySocket';
+import { buildApiUrl } from './lib/backendConfig';
+import { Radio, Sparkles, Share2, Heart, Crown } from 'lucide-react';
 import { playUiSound } from './lib/audioEngine';
 
 export function App() {
@@ -31,23 +34,27 @@ export function App() {
     currentUserRef.current = currentUser;
   }, [currentUser]);
 
-  const [activeTab, setActiveTab] = useState<'voice' | 'matches'>('voice');
+  const [activeTab, setActiveTab] = useState<'voice' | 'matches' | 'chess'>('voice');
   const [rooms, setRooms] = useState<SceneRoom[]>([]);
   const [peers, setPeers] = useState<SceneUser[]>([]);
   const [activeRoom, setActiveRoom] = useState<SceneRoom | null>(null);
   const [chatTargetUser, setChatTargetUser] = useState<SceneUser | null>(null);
+  const [initialChessGameId, setInitialChessGameId] = useState<string | null>(null);
+  const [initialChessTimeMs, setInitialChessTimeMs] = useState<number>(300000);
+  const [lobbyOnlineCount, setLobbyOnlineCount] = useState<number>(0);
+  const [isD1Connected, setIsD1Connected] = useState<boolean>(false);
 
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [isRestoreOpen, setIsRestoreOpen] = useState(false);
   const [isStoryCardOpen, setIsStoryCardOpen] = useState(false);
   const [isHostModalOpen, setIsHostModalOpen] = useState(false);
   const [isSpeedDateOpen, setIsSpeedDateOpen] = useState(false);
-  const [pendingAction, setPendingAction] = useState<'speed_date' | 'host_room' | null>(null);
+  const [pendingAction, setPendingAction] = useState<'speed_date' | 'host_room' | 'chess_invite' | null>(null);
   const [inviterUser, setInviterUser] = useState<SceneUser | null>(null);
 
   const loadData = useCallback(async (checkDeepLinks = false) => {
     const [fetchedRooms, fetchedUsers] = await Promise.all([
-      fetchSceneRooms(),
+      fetchSceneRooms(currentUserRef.current?.id),
       fetchSceneUsers(),
     ]);
     setRooms(fetchedRooms);
@@ -56,6 +63,18 @@ export function App() {
     if (!checkDeepLinks) return;
 
     const params = new URLSearchParams(window.location.search);
+    const chessParam = params.get('chess');
+    if (chessParam) {
+      const tc = Number(params.get('tc')) || 300000;
+      setInitialChessGameId(chessParam);
+      setInitialChessTimeMs(tc);
+      setActiveTab('chess');
+      if (!getCurrentUser()) {
+        setPendingAction('chess_invite');
+        setIsOnboardingOpen(true);
+      }
+    }
+
     const matchUserId = params.get('match');
     if (matchUserId) {
       const found = fetchedUsers.find(
@@ -134,6 +153,31 @@ export function App() {
     };
   }, [loadData]);
 
+  // Connect Cloudflare Durable Object LobbyHub for real-time presence & global queues
+  useEffect(() => {
+    fetch(buildApiUrl('/api/health'))
+      .then((res) => (res.ok && (res.headers.get('content-type') || '').includes('json') ? res.json() : null))
+      .then((data: { ok?: boolean } | null) => {
+        if (data?.ok) setIsD1Connected(true);
+      })
+      .catch(() => {});
+
+    const presenceId = currentUser?.id || `guest_${Math.random().toString(36).slice(2, 8)}`;
+    const presenceAlias = currentUser?.alias || 'BrowserGuest';
+    lobbySocket.connect(presenceId, presenceAlias);
+
+    const unsub = lobbySocket.subscribe((event) => {
+      if (event.type === 'presence_update') {
+        setLobbyOnlineCount(event.onlineCount);
+        setIsD1Connected(true);
+      }
+    });
+
+    return () => {
+      unsub();
+    };
+  }, [currentUser?.id, currentUser?.alias]);
+
   // Update online presence quietly every 60s without causing modal re-renders
   useEffect(() => {
     const interval = setInterval(() => {
@@ -207,7 +251,7 @@ export function App() {
   };
 
   const activePeersCount = peers.filter((p) => p.is_online && isFreshWithin24Hours(p.last_seen)).length;
-  const onlineCount = activePeersCount + (currentUser ? 1 : 0);
+  const onlineCount = Math.max(activePeersCount + (currentUser ? 1 : 0), lobbyOnlineCount);
 
   return (
     <div className="min-h-screen bg-[#070709] text-white flex flex-col font-body selection:bg-[#CCFF00] selection:text-black">
@@ -264,21 +308,21 @@ export function App() {
               }}
             />
 
-            <div className="flex items-center justify-between border-b border-white/10 mb-8 pt-4">
-              <div className="grid grid-cols-2 sm:flex items-center w-full sm:w-auto gap-1 sm:gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 mb-8 pt-4">
+              <div className="grid grid-cols-3 sm:flex items-center w-full lg:w-auto gap-1 sm:gap-2">
                 <button
                   onClick={() => {
                     playUiSound('click');
                     setActiveTab('voice');
                   }}
-                  className={`px-2 sm:px-5 py-3 font-heading font-black text-xs sm:text-base flex items-center justify-center sm:justify-start gap-1.5 sm:gap-2 border-b-2 transition-all whitespace-nowrap ${
+                  className={`px-1.5 sm:px-3.5 lg:px-5 py-3 font-heading font-black text-xs sm:text-sm lg:text-base flex items-center justify-center sm:justify-start gap-1 sm:gap-2 border-b-2 transition-all whitespace-nowrap ${
                     activeTab === 'voice'
                       ? 'border-[#CCFF00] text-[#CCFF00]'
                       : 'border-transparent text-white/50 hover:text-white'
                   }`}
                 >
                   <Radio className="w-4 h-4 flex-shrink-0" />
-                  <span className="sm:hidden">Voice Scenes</span>
+                  <span className="sm:hidden">Voice</span>
                   <span className="hidden sm:inline">Live Voice Scenes</span>
                   <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-[#CCFF00]/15 text-[#CCFF00]">
                     {rooms.length}
@@ -290,23 +334,49 @@ export function App() {
                     playUiSound('click');
                     setActiveTab('matches');
                   }}
-                  className={`px-2 sm:px-5 py-3 font-heading font-black text-xs sm:text-base flex items-center justify-center sm:justify-start gap-1.5 sm:gap-2 border-b-2 transition-all whitespace-nowrap ${
+                  className={`px-1.5 sm:px-3.5 lg:px-5 py-3 font-heading font-black text-xs sm:text-sm lg:text-base flex items-center justify-center sm:justify-start gap-1 sm:gap-2 border-b-2 transition-all whitespace-nowrap ${
                     activeTab === 'matches'
                       ? 'border-[#CCFF00] text-[#CCFF00]'
                       : 'border-transparent text-white/50 hover:text-white'
                   }`}
                 >
                   <Sparkles className="w-4 h-4 flex-shrink-0" />
-                  <span>Scene Matches</span>
+                  <span className="sm:hidden">Matches</span>
+                  <span className="hidden sm:inline">Scene Matches</span>
                   <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-300">
                     24h
                   </span>
                 </button>
+
+                <button
+                  onClick={() => {
+                    playUiSound('click');
+                    setActiveTab('chess');
+                  }}
+                  className={`px-1.5 sm:px-3.5 lg:px-5 py-3 font-heading font-black text-xs sm:text-sm lg:text-base flex items-center justify-center sm:justify-start gap-1 sm:gap-2 border-b-2 transition-all whitespace-nowrap ${
+                    activeTab === 'chess'
+                      ? 'border-cyan-400 text-cyan-300'
+                      : 'border-transparent text-white/50 hover:text-white'
+                  }`}
+                >
+                  <Crown className="w-4 h-4 flex-shrink-0" />
+                  <span className="sm:hidden">Chess</span>
+                  <span className="hidden sm:inline">Chess + Video</span>
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300">
+                    LIVE
+                  </span>
+                </button>
               </div>
 
-              <div className="hidden sm:flex items-center gap-2 text-xs font-mono text-white/40 flex-shrink-0">
+              <div className="hidden lg:flex items-center gap-2 text-xs font-mono text-white/40 flex-shrink-0">
                 <span className="w-1.5 h-1.5 rounded-full bg-[#CCFF00]" />
-                <span>{isSupabaseConfigured ? 'Supabase Realtime Live' : 'P2P Local Mode'}</span>
+                <span>
+                  {isD1Connected
+                    ? 'Cloudflare D1 + DO Live'
+                    : isSupabaseConfigured
+                    ? 'Supabase Realtime Live'
+                    : 'P2P Local Mode'}
+                </span>
               </div>
             </div>
 
@@ -321,12 +391,24 @@ export function App() {
                   setIsOnboardingOpen(true);
                 }}
               />
-            ) : (
+            ) : activeTab === 'matches' ? (
               <SceneBoard
                 peers={peers}
                 currentUser={currentUser}
                 onOpenChat={(peer) => setChatTargetUser(peer)}
                 onOpenOnboarding={() => setIsOnboardingOpen(true)}
+              />
+            ) : (
+              <ChessArena
+                key={`${initialChessGameId || 'lobby'}_${currentUser ? currentUser.id : 'anon'}`}
+                currentUser={currentUser}
+                initialGameId={initialChessGameId}
+                initialTimeControlMs={initialChessTimeMs}
+                onOpenOnboarding={() => {
+                  setPendingAction('chess_invite');
+                  setIsOnboardingOpen(true);
+                }}
+                onClearInitialGame={() => setInitialChessGameId(null)}
               />
             )}
           </>
@@ -335,17 +417,17 @@ export function App() {
 
       {/* Mobile Bottom Bar Navigation (hidden inside active voice room so controls stay unobstructed) */}
       {!(activeRoom && currentUser) && (
-        <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#070709]/95 backdrop-blur-lg border-t border-white/10 px-4 py-2 flex items-center justify-around">
+        <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#070709]/95 backdrop-blur-lg border-t border-white/10 px-2 py-2 flex items-center justify-around">
           <button
             onClick={() => {
               playUiSound('click');
               setActiveTab('voice');
             }}
-            className={`flex flex-col items-center gap-1 text-[11px] font-mono ${
+            className={`flex flex-col items-center gap-0.5 text-[10px] font-mono ${
               activeTab === 'voice' ? 'text-[#CCFF00] font-bold' : 'text-white/60'
             }`}
           >
-            <Radio className="w-5 h-5" />
+            <Radio className="w-4 h-4" />
             <span>Voice</span>
           </button>
 
@@ -354,12 +436,25 @@ export function App() {
               playUiSound('click');
               setActiveTab('matches');
             }}
-            className={`flex flex-col items-center gap-1 text-[11px] font-mono ${
+            className={`flex flex-col items-center gap-0.5 text-[10px] font-mono ${
               activeTab === 'matches' ? 'text-[#CCFF00] font-bold' : 'text-white/60'
             }`}
           >
-            <Sparkles className="w-5 h-5" />
+            <Sparkles className="w-4 h-4" />
             <span>Matches</span>
+          </button>
+
+          <button
+            onClick={() => {
+              playUiSound('click');
+              setActiveTab('chess');
+            }}
+            className={`flex flex-col items-center gap-0.5 text-[10px] font-mono ${
+              activeTab === 'chess' ? 'text-cyan-300 font-bold' : 'text-white/60'
+            }`}
+          >
+            <Crown className="w-4 h-4" />
+            <span>Chess</span>
           </button>
 
           <button
@@ -372,10 +467,10 @@ export function App() {
                 setIsSpeedDateOpen(true);
               }
             }}
-            className="flex flex-col items-center gap-1 text-[11px] font-mono text-[#CCFF00] font-bold"
+            className="flex flex-col items-center gap-0.5 text-[10px] font-mono text-[#CCFF00] font-bold"
           >
-            <Heart className="w-5 h-5 fill-[#CCFF00] animate-bounce" />
-            <span>Blind Date</span>
+            <Heart className="w-4 h-4 fill-[#CCFF00] animate-bounce" />
+            <span>Date</span>
           </button>
 
           {currentUser ? (
@@ -384,10 +479,10 @@ export function App() {
                 playUiSound('click');
                 setIsStoryCardOpen(true);
               }}
-              className="flex flex-col items-center gap-1 text-[11px] font-mono text-white/60 hover:text-white"
+              className="flex flex-col items-center gap-0.5 text-[10px] font-mono text-white/60 hover:text-white"
             >
-              <Share2 className="w-5 h-5 text-[#FF2E93]" />
-              <span>Story Card</span>
+              <Share2 className="w-4 h-4 text-[#FF2E93]" />
+              <span>Card</span>
             </button>
           ) : (
             <button
@@ -395,10 +490,10 @@ export function App() {
                 playUiSound('click');
                 setIsOnboardingOpen(true);
               }}
-              className="flex flex-col items-center gap-1 text-[11px] font-mono text-[#CCFF00] font-bold"
+              className="flex flex-col items-center gap-0.5 text-[10px] font-mono text-[#CCFF00] font-bold"
             >
-              <Sparkles className="w-5 h-5 fill-[#CCFF00]" />
-              <span>Set Scene</span>
+              <Sparkles className="w-4 h-4 fill-[#CCFF00]" />
+              <span>Set</span>
             </button>
           )}
         </nav>
@@ -443,6 +538,9 @@ export function App() {
             } else if (pendingAction === 'host_room') {
               setPendingAction(null);
               setIsHostModalOpen(true);
+            } else if (pendingAction === 'chess_invite') {
+              setPendingAction(null);
+              setActiveTab('chess');
             }
           }}
         />

@@ -23,6 +23,11 @@ dist-ssr
 *.sln
 *.sw?
 
-# Environment files
+# Environment & Cloudflare Wrangler files
 .env
 .env.production
+.env.*.local
+.dev.vars
+worker/.dev.vars
+.wrangler
+worker/.wrangler

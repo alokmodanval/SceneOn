@@ -1,4 +1,5 @@
 import { SceneMessage, SceneUser } from '../types';
+import { buildApiUrl } from './backendConfig';
 
 export const AI_PERSONAS_ENABLED =
   import.meta.env.VITE_ENABLE_AI_PERSONAS !== 'false';
@@ -103,7 +104,7 @@ export async function generateGroqReply(
   }));
 
   try {
-    const res = await fetch('/api/ai-chat', {
+    const res = await fetch(buildApiUrl('/api/ai-chat'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -140,7 +141,7 @@ export async function generateFirstMessageToUser(
   userPrompt: string
 ): Promise<string> {
   try {
-    const res = await fetch('/api/ai-chat', {
+    const res = await fetch(buildApiUrl('/api/ai-chat'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

@@ -1,12 +1,12 @@
 import React from 'react';
-import { Radio, ShieldCheck, Zap, Users, Flame, Heart } from 'lucide-react';
+import { Radio, ShieldCheck, Zap, Users, Flame, Heart, Video } from 'lucide-react';
 import { SceneUser } from '../types';
 import { playUiSound } from '../lib/audioEngine';
 
 interface HeroProps {
   currentUser: SceneUser | null;
   onOpenOnboarding: () => void;
-  onSelectTab: (tab: 'voice' | 'matches') => void;
+  onSelectTab: (tab: 'voice' | 'matches' | 'chess') => void;
   onOpenSpeedDate: () => void;
 }
 
@@ -91,6 +91,17 @@ export const Hero: React.FC<HeroProps> = ({
           >
             <Radio className="w-4 h-4 text-[#CCFF00]" />
             <span>Live Voice Pods</span>
+          </button>
+
+          <button
+            onClick={() => {
+              playUiSound('pop');
+              onSelectTab('chess');
+            }}
+            className="w-full sm:w-auto px-5 py-3.5 rounded-2xl text-sm sm:text-base font-mono font-bold text-cyan-300 hover:text-white flex items-center justify-center gap-2 bg-cyan-500/10 border border-cyan-400/35 hover:border-cyan-400 transition-all"
+          >
+            <Video className="w-4 h-4 text-cyan-300" />
+            <span>♟️ Chess + Video</span>
           </button>
         </div>
 

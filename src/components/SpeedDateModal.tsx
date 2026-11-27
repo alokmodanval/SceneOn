@@ -32,6 +32,7 @@ import { WebRTCMeshRoom } from '../lib/webrtcMesh';
 import { MASKED_CODENAMES, SPEED_DATE_TOPICS } from '../lib/constants';
 import { calculateSceneMatch } from '../lib/matchAlgorithm';
 import { getOrCreateChat } from '../lib/supabase';
+import { lobbySocket } from '../lib/lobbySocket';
 
 interface SpeedDateModalProps {
   isOpen: boolean;
@@ -377,6 +378,7 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
   useEffect(() => {
     if (!isOpen) {
       isActiveRef.current = false;
+      lobbySocket.leaveSpeedQueue();
       cleanupAudio();
       return;
     }
@@ -385,13 +387,46 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
     remoteVerdictRef.current = null;
     playUiSound('pop');
 
+    // Join global Cloudflare Durable Object matchmaking queue for live human-to-human pairing
+    lobbySocket.joinSpeedQueue(currentUser);
+    const unsubLobby = lobbySocket.subscribe((event) => {
+      if (event.type === 'speed_matched' && isActiveRef.current) {
+        if (radarTimerRef.current) {
+          clearTimeout(radarTimerRef.current);
+          radarTimerRef.current = null;
+        }
+        const calculatedMatch = calculateSceneMatch(currentUser, event.partner);
+        setMatchScore(calculatedMatch);
+        const liveSession: SpeedDateSession = {
+          sessionId: event.sessionId,
+          partner: event.partner,
+          maskedAlias: event.maskedAlias,
+          maskedEmoji: event.maskedEmoji,
+          topic: event.topic,
+          startedAt: Date.now(),
+        };
+        setSession(liveSession);
+        setStage('connecting');
+        playUiSound('chime');
+        connectTimerRef.current = setTimeout(() => {
+          if (isActiveRef.current) {
+            startLiveVoiceCall(liveSession);
+          }
+        }, 2000);
+      }
+    });
+
+    // If no human is waiting in the queue after 4.5s, pair with online peers or cold-start AI gracefully
     radarTimerRef.current = setTimeout(() => {
       if (!isActiveRef.current) return;
+      lobbySocket.leaveSpeedQueue();
       findPartnerAndConnect();
     }, 4500);
 
     return () => {
       isActiveRef.current = false;
+      unsubLobby();
+      lobbySocket.leaveSpeedQueue();
       cleanupAudio();
       setStage('radar');
       setTimeLeft(180);
@@ -403,7 +438,7 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
       setWaitingPartnerVerdict(false);
       setBailNotice(null);
     };
-  }, [isOpen, cleanupAudio, findPartnerAndConnect]);
+  }, [isOpen, cleanupAudio, currentUser, findPartnerAndConnect, startLiveVoiceCall]);
 
   const toggleMic = () => {
     if (!rawStreamRef.current) {

@@ -56,8 +56,20 @@ function localAiChatDevPlugin(apiKey: string): Plugin {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
   const groqKey = env.GROQ_API_KEY || env.VITE_GROQ_API_KEY || '';
+  const localWorkerTarget = env.VITE_LOCAL_WORKER_URL || 'http://127.0.0.1:8787';
+  const localWsTarget = localWorkerTarget.replace(/^http/, 'ws');
 
   return {
     plugins: [react(), localAiChatDevPlugin(groqKey)],
+    server: {
+      proxy: {
+        '/api/health': { target: localWorkerTarget, changeOrigin: true },
+        '/api/users': { target: localWorkerTarget, changeOrigin: true },
+        '/api/aura': { target: localWorkerTarget, changeOrigin: true },
+        '/api/rooms': { target: localWorkerTarget, changeOrigin: true },
+        '/api/chats': { target: localWorkerTarget, changeOrigin: true },
+        '/ws': { target: localWsTarget, ws: true, changeOrigin: true },
+      },
+    },
   };
 });
