@@ -62,8 +62,12 @@ async function callGroq(
   apiKey: string,
   model: string,
   messages: { role: string; content: string }[],
-  maxTokens: number
+  maxTokens: number,
+  extraParams: Record<string, unknown> = {}
 ): Promise<string | null> {
+  const cleanKey = apiKey.trim();
+  if (!cleanKey) return null;
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 12000);
 
@@ -72,13 +76,14 @@ async function callGroq(
       method: 'POST',
       signal: controller.signal,
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${cleanKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
         model,
         temperature: 0.85,
         max_tokens: maxTokens,
+        ...extraParams,
         messages,
       }),
     });
@@ -87,7 +92,7 @@ async function callGroq(
     const data = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };
-    return data.choices?.[0]?.message?.content || null;
+    return data.choices?.[0]?.message?.content?.trim() || null;
   } catch {
     return null;
   } finally {
@@ -123,7 +128,13 @@ export async function handleAiChatRequest(
 Send a short, natural 1-sentence opening text to break the ice with them in casual Hinglish/English.
 Keep it lowercase, friendly, and relatable. Maximum 1 sentence.`;
 
-    const content = await callGroq(apiKey, 'openai/gpt-oss-20b', [{ role: 'user', content: prompt }], 80);
+    const content = await callGroq(
+      apiKey,
+      'qwen/qwen3.8-27b',
+      [{ role: 'user', content: prompt }],
+      180,
+      { reasoning_effort: 'none' }
+    );
     return { status: 200, data: { text: cleanAIText(content || fallbackFirst) } };
   }
 
@@ -162,12 +173,16 @@ ${
     { role: 'user', content: latestUserMessage },
   ];
 
-  const primary = await callGroq(apiKey, 'openai/gpt-oss-120b', messages, 120);
+  const primary = await callGroq(apiKey, 'openai/gpt-oss-120b', messages, 400, {
+    reasoning_effort: 'low',
+  });
   if (primary) {
     return { status: 200, data: { text: cleanAIText(primary) } };
   }
 
-  const secondary = await callGroq(apiKey, 'openai/gpt-oss-20b', messages, 100);
+  const secondary = await callGroq(apiKey, 'qwen/qwen3.8-27b', messages, 220, {
+    reasoning_effort: 'none',
+  });
   return {
     status: 200,
     data: { text: cleanAIText(secondary || fallbackReply) },
