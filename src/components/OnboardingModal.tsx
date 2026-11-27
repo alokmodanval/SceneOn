@@ -139,19 +139,20 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
-      <div className="relative w-full max-w-xl bg-[#111116] border-2 border-[#CCFF00] rounded-2xl p-5 sm:p-8 shadow-neo max-h-[92dvh] overflow-y-auto">
+      <div className="relative w-full max-w-xl bg-[#111116] border-2 border-[#CCFF00] rounded-2xl p-5 sm:p-7 shadow-neo max-h-[90dvh] flex flex-col">
         {/* Close Button */}
         {currentUser && (
           <button
             onClick={onClose}
-            className="absolute top-4 right-4 p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/60 hover:text-white transition-colors"
+            aria-label="Close onboarding"
+            className="absolute top-4 right-4 p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/60 hover:text-white transition-colors z-10"
           >
             <X className="w-5 h-5" />
           </button>
         )}
 
         {/* Header / Step Tracker */}
-        <div className="mb-6">
+        <div className="mb-4 flex-shrink-0 pr-8">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-mono font-bold text-[#CCFF00] uppercase tracking-wider">
               {currentUser ? '⚡ Update Your Scene' : '⚡ 15-Second Onboarding Wizard'}
@@ -167,6 +168,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             />
           </div>
         </div>
+
+        {/* Scrollable Body */}
+        <div className="flex-1 overflow-y-auto pr-1">
 
         {/* STEP 1: Alias & Avatar */}
         {step === 1 && (
@@ -465,15 +469,17 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
           </div>
         )}
 
+        </div>
+
         {/* Error message */}
         {errorMsg && (
-          <div className="mt-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-mono">
+          <div className="mt-3 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-mono flex-shrink-0">
             ⚠️ {errorMsg}
           </div>
         )}
 
-        {/* Bottom Navigation Buttons */}
-        <div className="mt-8 pt-4 border-t border-white/10 flex items-center justify-between gap-4">
+        {/* Sticky Bottom Navigation Buttons */}
+        <div className="mt-5 pt-4 border-t border-white/10 flex items-center justify-between gap-4 flex-shrink-0">
           {step > 1 ? (
             <button
               type="button"

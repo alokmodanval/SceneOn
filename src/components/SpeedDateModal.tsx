@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import confetti from 'canvas-confetti';
 import {
   Mic,
@@ -57,32 +57,67 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
     commonTags: [],
   });
 
-  // Call timers (180 seconds = 3 minutes)
   const [timeLeft, setTimeLeft] = useState(180);
   const [isMuted, setIsMuted] = useState(false);
   const [voiceFilter, setVoiceFilter] = useState<VoiceFilterMode>('natural');
   const [isLocalSpeaking, setIsLocalSpeaking] = useState(false);
   const [isRemoteSpeaking, setIsRemoteSpeaking] = useState(false);
   const [floatingReactions, setFloatingReactions] = useState<{ id: string; emoji: string; x: number }[]>([]);
-
-  // Verdict state
   const [isSubmittingVerdict, setIsSubmittingVerdict] = useState(false);
+  const [waitingPartnerVerdict, setWaitingPartnerVerdict] = useState(false);
+  const [bailNotice, setBailNotice] = useState<string | null>(null);
 
-  // References
+  const isMutedRef = useRef(isMuted);
+  const isActiveRef = useRef(false);
+  const remoteVerdictRef = useRef<'w_scene' | 'pass' | null>(null);
+  const peersRef = useRef(peers);
+
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+  }, [isMuted]);
+
+  useEffect(() => {
+    peersRef.current = peers;
+  }, [peers]);
+
   const rawStreamRef = useRef<MediaStream | null>(null);
   const filterPipelineRef = useRef<VoiceFilterPipeline | null>(null);
   const meshRef = useRef<WebRTCMeshRoom | null>(null);
   const meterCleanupRef = useRef<(() => void) | null>(null);
   const remoteMeterRef = useRef<(() => void) | null>(null);
-  const radarTimerRef = useRef<any>(null);
-  const callIntervalRef = useRef<any>(null);
-  const aiSpeechTimerRef = useRef<any>(null);
+  const radarTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const callIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const aiSpeechTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const verdictGraceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const cleanupAudio = () => {
+  const cleanupAudio = useCallback(() => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
-      } catch {}
+      } catch {
+        // Ignore speech synthesis errors
+      }
+    }
+    if (radarTimerRef.current) {
+      clearTimeout(radarTimerRef.current);
+      radarTimerRef.current = null;
+    }
+    if (connectTimerRef.current) {
+      clearTimeout(connectTimerRef.current);
+      connectTimerRef.current = null;
+    }
+    if (callIntervalRef.current) {
+      clearInterval(callIntervalRef.current);
+      callIntervalRef.current = null;
+    }
+    if (aiSpeechTimerRef.current) {
+      clearTimeout(aiSpeechTimerRef.current);
+      aiSpeechTimerRef.current = null;
+    }
+    if (verdictGraceRef.current) {
+      clearTimeout(verdictGraceRef.current);
+      verdictGraceRef.current = null;
     }
     if (rawStreamRef.current) {
       rawStreamRef.current.getTracks().forEach((t) => t.stop());
@@ -104,28 +139,53 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
       meshRef.current.leave();
       meshRef.current = null;
     }
-  };
+  }, []);
 
-  const triggerFloatingReaction = (emoji: string) => {
+  const triggerFloatingReaction = useCallback((emoji: string) => {
     const id = `${Date.now()}-${Math.random()}`;
     const x = Math.random() * 70 + 15;
     setFloatingReactions((prev) => [...prev, { id, emoji, x }]);
     setTimeout(() => {
       setFloatingReactions((prev) => prev.filter((r) => r.id !== id));
     }, 2000);
-  };
+  }, []);
 
-  const handleEarlyBail = (reason?: string) => {
-    playUiSound('kick');
-    cleanupAudio();
-    clearInterval(callIntervalRef.current);
-    if (reason) alert(reason);
-    setStage('passed');
-  };
+  const handleEarlyBail = useCallback(
+    (reason?: string) => {
+      playUiSound('kick');
+      cleanupAudio();
+      if (reason) setBailNotice(reason);
+      setStage('passed');
+    },
+    [cleanupAudio]
+  );
 
-  const simulateAIPartnerAudio = (sess: SpeedDateSession) => {
-    // Generate an audio greeting using Web Speech API if supported
+  const completeMutualMatch = useCallback(
+    async (sess: SpeedDateSession) => {
+      try {
+        await getOrCreateChat(currentUser.id, sess.partner.id);
+      } catch (err) {
+        console.error('Failed to finalize speed match chat:', err);
+      }
+
+      playUiSound('unlock');
+      confetti({
+        particleCount: 100,
+        spread: 80,
+        origin: { y: 0.6 },
+        colors: ['#CCFF00', '#FF2E93', '#00F0FF', '#8B5CF6'],
+      });
+      cleanupAudio();
+      setWaitingPartnerVerdict(false);
+      setIsSubmittingVerdict(false);
+      setStage('matched');
+    },
+    [cleanupAudio, currentUser.id]
+  );
+
+  const simulateAIPartnerAudio = useCallback((sess: SpeedDateSession) => {
     aiSpeechTimerRef.current = setTimeout(() => {
+      if (!isActiveRef.current) return;
       try {
         if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
           const welcomeUtterance = new SpeechSynthesisUtterance(
@@ -141,99 +201,141 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
         console.warn('Speech synthesis skipped:', err);
       }
     }, 2000);
-  };
+  }, []);
 
-  const startLiveVoiceCall = async (sess: SpeedDateSession) => {
-    try {
-      // Acquire mic
-      let audioStream: MediaStream;
+  const startLiveVoiceCall = useCallback(
+    async (sess: SpeedDateSession) => {
+      if (!isActiveRef.current) return;
+
       try {
-        audioStream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-          video: false,
-        });
-        rawStreamRef.current = audioStream;
-
-        const pipeline = createVoiceFilterPipeline(audioStream);
-        filterPipelineRef.current = pipeline;
-
-        meterCleanupRef.current = createVolumeMeter(audioStream, (_level, isSpeaking) => {
-          setIsLocalSpeaking(isSpeaking && !isMuted);
-          meshRef.current?.broadcastSpeaking(isSpeaking && !isMuted);
-        });
-
-        audioStream = pipeline.outputStream;
-      } catch (micErr) {
-        console.warn('Microphone not available, using silent stream:', micErr);
-        audioStream = createSilentAudioStream();
-      }
-
-      // Initialize WebRTC Mesh
-      const mesh = new WebRTCMeshRoom(sess.sessionId, currentUser.id, currentUser.alias, {
-        onRemoteStream: (_peerId, remoteStream) => {
-          remoteMeterRef.current = createVolumeMeter(remoteStream, (_level, isSpeaking) => {
-            setIsRemoteSpeaking(isSpeaking);
+        let audioStream: MediaStream;
+        let hasMic = true;
+        try {
+          audioStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+            video: false,
           });
-        },
-        onPeerLeave: () => {
-          handleEarlyBail('Partner disconnected from the call.');
-        },
-        onReaction: (emoji) => {
-          triggerFloatingReaction(emoji);
-        },
-        onTopicChange: (newTopic) => {
-          setSession((prev) => (prev ? { ...prev, topic: newTopic } : null));
-        },
-        onPeerSpeaking: (_peerId, speaking) => {
-          setIsRemoteSpeaking(speaking);
-        },
-      });
-
-      meshRef.current = mesh;
-      await mesh.start(audioStream, 'speaker', 1);
-
-      setStage('in_call');
-      playUiSound('unlock');
-
-      // 3-Minute countdown ticker
-      callIntervalRef.current = setInterval(() => {
-        setTimeLeft((prev) => {
-          if (prev <= 1) {
-            clearInterval(callIntervalRef.current);
-            setStage('verdict');
-            playUiSound('chime');
-            return 0;
+          if (!isActiveRef.current) {
+            audioStream.getTracks().forEach((t) => t.stop());
+            return;
           }
-          if (prev === 31) {
-            playUiSound('kick'); // 30s remaining audio alert
-          }
-          return prev - 1;
-        });
-      }, 1000);
+          rawStreamRef.current = audioStream;
 
-      // AI Persona voice interaction simulation if partner is AI
-      if (sess.partner.id.startsWith('ai-')) {
-        simulateAIPartnerAudio(sess);
+          const pipeline = createVoiceFilterPipeline(audioStream);
+          filterPipelineRef.current = pipeline;
+
+          meterCleanupRef.current = createVolumeMeter(audioStream, (_level, isSpeaking) => {
+            const active = isSpeaking && !isMutedRef.current;
+            setIsLocalSpeaking(active);
+            meshRef.current?.broadcastSpeaking(active);
+          });
+
+          audioStream = pipeline.outputStream;
+        } catch (micErr) {
+          console.warn('Microphone not available, using silent stream:', micErr);
+          hasMic = false;
+          setIsMuted(true);
+          isMutedRef.current = true;
+          audioStream = createSilentAudioStream();
+        }
+
+        if (!isActiveRef.current) return;
+
+        const mesh = new WebRTCMeshRoom(
+          sess.sessionId,
+          currentUser.id,
+          currentUser.alias,
+          {
+            onRemoteStream: (_peerId, remoteStream) => {
+              if (remoteMeterRef.current) remoteMeterRef.current();
+              remoteMeterRef.current = createVolumeMeter(remoteStream, (_level, isSpeaking) => {
+                setIsRemoteSpeaking(isSpeaking);
+              });
+            },
+            onPeerLeave: () => {
+              handleEarlyBail('Partner disconnected from the call.');
+            },
+            onReaction: (emoji) => {
+              triggerFloatingReaction(emoji);
+            },
+            onTopicChange: (newTopic) => {
+              setSession((prev) => (prev ? { ...prev, topic: newTopic } : null));
+            },
+            onPeerSpeaking: (_peerId, speaking) => {
+              setIsRemoteSpeaking(speaking);
+            },
+            onSpeedVerdict: (_userId, verdict) => {
+              remoteVerdictRef.current = verdict;
+              if (verdict === 'pass') {
+                handleEarlyBail('Your partner chose to pass this round.');
+              } else if (verdict === 'w_scene' && waitingPartnerVerdict) {
+                completeMutualMatch(sess);
+              }
+            },
+          },
+          currentUser.avatar,
+          !hasMic
+        );
+
+        meshRef.current = mesh;
+        await mesh.start(audioStream, 'speaker', 1);
+
+        if (!isActiveRef.current) {
+          cleanupAudio();
+          return;
+        }
+
+        setStage('in_call');
+        playUiSound('unlock');
+
+        callIntervalRef.current = setInterval(() => {
+          setTimeLeft((prev) => {
+            if (prev <= 1) {
+              if (callIntervalRef.current) clearInterval(callIntervalRef.current);
+              setStage('verdict');
+              playUiSound('chime');
+              return 0;
+            }
+            if (prev === 31) {
+              playUiSound('kick');
+            }
+            return prev - 1;
+          });
+        }, 1000);
+
+        if (sess.partner.id.startsWith('ai-')) {
+          simulateAIPartnerAudio(sess);
+        }
+      } catch (err) {
+        console.error('Speed date call start failed:', err);
+        setStage('verdict');
       }
-    } catch (err) {
-      console.error('Speed date call start failed:', err);
-      setStage('verdict');
-    }
-  };
+    },
+    [
+      cleanupAudio,
+      completeMutualMatch,
+      currentUser.alias,
+      currentUser.avatar,
+      currentUser.id,
+      handleEarlyBail,
+      simulateAIPartnerAudio,
+      triggerFloatingReaction,
+      waitingPartnerVerdict,
+    ]
+  );
 
-  const findPartnerAndConnect = () => {
-    // Find eligible candidates (exclude self)
-    const candidates = peers.filter((p) => p.id !== currentUser.id);
+  const findPartnerAndConnect = useCallback(() => {
+    if (!isActiveRef.current) return;
+
+    const candidates = peersRef.current.filter((p) => p.id !== currentUser.id);
     let chosenPartner: SceneUser;
 
     if (candidates.length > 0) {
-      // Pick random compatible peer
       chosenPartner = candidates[Math.floor(Math.random() * candidates.length)];
     } else {
-      // Fallback virtual peer
       chosenPartner = {
         id: 'ai-tara',
-        scene_key: 'SCENE-TARA-7788',
+        scene_key: 'SCENE-TARA-99AA',
         alias: 'TaraVibes',
         avatar: { bg: 'from-pink-500 to-rose-700', emoji: '✨' },
         tags: ['🌙 3AM Rants', '🎵 Lo-Fi & Indie', '☕ Chai & Bakchodi'],
@@ -245,14 +347,15 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
       };
     }
 
-    // Assign anonymous mask and topic
     const mask = MASKED_CODENAMES[Math.floor(Math.random() * MASKED_CODENAMES.length)];
     const chosenTopic = SPEED_DATE_TOPICS[Math.floor(Math.random() * SPEED_DATE_TOPICS.length)];
     const calculatedMatch = calculateSceneMatch(currentUser, chosenPartner);
     setMatchScore(calculatedMatch);
 
+    // Deterministic 5-minute pairing window bucket so two human peers land in the same WebRTC session
+    const pairingWindow = Math.floor(Date.now() / 300000);
     const newSession: SpeedDateSession = {
-      sessionId: `spd_${[currentUser.id, chosenPartner.id].sort().join('_')}_${Date.now()}`,
+      sessionId: `spd_${[currentUser.id, chosenPartner.id].sort().join('_')}_${pairingWindow}`,
       partner: chosenPartner,
       maskedAlias: mask.name,
       maskedEmoji: mask.emoji,
@@ -264,56 +367,68 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
     setStage('connecting');
     playUiSound('chime');
 
-    // 2.5s preview before audio call kicks in
-    setTimeout(() => {
-      startLiveVoiceCall(newSession);
+    connectTimerRef.current = setTimeout(() => {
+      if (isActiveRef.current) {
+        startLiveVoiceCall(newSession);
+      }
     }, 2800);
-  };
+  }, [currentUser, startLiveVoiceCall]);
 
-  // Initialize Matchmaking on open
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      isActiveRef.current = false;
+      cleanupAudio();
+      return;
+    }
 
-    setStage('radar');
-    setTimeLeft(180);
-    setIsSubmittingVerdict(false);
+    isActiveRef.current = true;
+    remoteVerdictRef.current = null;
     playUiSound('pop');
 
-    // Radar simulation: 4-6 seconds scan to pair with available peer or AI persona
     radarTimerRef.current = setTimeout(() => {
+      if (!isActiveRef.current) return;
       findPartnerAndConnect();
     }, 4500);
 
     return () => {
-      clearTimeout(radarTimerRef.current);
-      clearInterval(callIntervalRef.current);
-      clearTimeout(aiSpeechTimerRef.current);
+      isActiveRef.current = false;
       cleanupAudio();
+      setStage('radar');
+      setTimeLeft(180);
+      setIsMuted(false);
+      isMutedRef.current = false;
+      setIsLocalSpeaking(false);
+      setIsRemoteSpeaking(false);
+      setIsSubmittingVerdict(false);
+      setWaitingPartnerVerdict(false);
+      setBailNotice(null);
     };
-  }, [isOpen]);
+  }, [isOpen, cleanupAudio, findPartnerAndConnect]);
 
-  // Toggle Microphone
   const toggleMic = () => {
+    if (!rawStreamRef.current) {
+      setBailNotice('Microphone permission unavailable in this session.');
+      return;
+    }
     playUiSound('pop');
     const nextState = !isMuted;
     setIsMuted(nextState);
+    isMutedRef.current = nextState;
+    if (nextState) setIsLocalSpeaking(false);
 
-    if (rawStreamRef.current) {
-      rawStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = !nextState));
-    }
+    rawStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = !nextState));
     if (filterPipelineRef.current) {
       filterPipelineRef.current.outputStream.getAudioTracks().forEach((t) => (t.enabled = !nextState));
     }
+    meshRef.current?.broadcastMuteState(nextState);
   };
 
-  // Change Voice Filter
   const handleFilterChange = (mode: VoiceFilterMode) => {
     playUiSound('click');
     setVoiceFilter(mode);
     filterPipelineRef.current?.setMode(mode);
   };
 
-  // Flip topic during call
   const handleFlipTopic = () => {
     playUiSound('pop');
     const remaining = SPEED_DATE_TOPICS.filter((t) => t !== session?.topic);
@@ -324,16 +439,15 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
     }
   };
 
-  // Send Floating Reaction
   const handleSendReaction = (emoji: string) => {
     playUiSound('reaction');
     triggerFloatingReaction(emoji);
     meshRef.current?.sendReaction(emoji);
   };
 
-  // Submit Final Verdict
   const handleVerdictSubmit = async (verdict: 'w_scene' | 'pass') => {
     playUiSound('click');
+    meshRef.current?.broadcastSpeedVerdict(verdict);
 
     if (verdict === 'pass') {
       cleanupAudio();
@@ -341,31 +455,31 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
       return;
     }
 
-    // If verdict is 'w_scene'
-    try {
-      setIsSubmittingVerdict(true);
-      if (session) {
-        // Create active chat between users
-        await getOrCreateChat(currentUser.id, session.partner.id);
+    if (!session) return;
 
-        playUiSound('unlock');
-        confetti({
-          particleCount: 100,
-          spread: 80,
-          origin: { y: 0.6 },
-          colors: ['#CCFF00', '#FF2E93', '#00F0FF', '#8B5CF6'],
-        });
+    setIsSubmittingVerdict(true);
+    const isAi = session.partner.id.startsWith('ai-');
 
-        cleanupAudio();
-        setStage('matched');
-      }
-    } catch (err) {
-      console.error('Failed to finalize speed match:', err);
-      cleanupAudio();
-      setStage('matched');
-    } finally {
-      setIsSubmittingVerdict(false);
+    if (isAi || remoteVerdictRef.current === 'w_scene') {
+      await completeMutualMatch(session);
+      return;
     }
+
+    if (remoteVerdictRef.current === 'pass') {
+      cleanupAudio();
+      setBailNotice('Partner chose to pass this round.');
+      setIsSubmittingVerdict(false);
+      setStage('passed');
+      return;
+    }
+
+    // Real human partner hasn't voted yet: wait briefly, then finalize gracefully if offline/solo
+    setWaitingPartnerVerdict(true);
+    verdictGraceRef.current = setTimeout(() => {
+      if (isActiveRef.current) {
+        completeMutualMatch(session);
+      }
+    }, 3500);
   };
 
   if (!isOpen) return null;
@@ -389,7 +503,7 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
         ))}
       </div>
 
-      <div className="relative w-full max-w-xl bg-[#0D0D12] border-2 border-[#CCFF00] rounded-3xl p-5 sm:p-7 shadow-neo overflow-hidden">
+      <div className="relative w-full max-w-xl bg-[#0D0D12] border-2 border-[#CCFF00] rounded-3xl p-5 sm:p-7 shadow-neo overflow-hidden max-h-[92dvh] overflow-y-auto">
         {/* Close / Bail Button */}
         <button
           onClick={() => {
@@ -397,6 +511,7 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
             cleanupAudio();
             onClose();
           }}
+          aria-label="Close speed dating"
           className="absolute top-4 right-4 p-2 rounded-xl bg-white/5 hover:bg-white/10 text-white/60 hover:text-white transition-colors z-20"
         >
           <X className="w-5 h-5" />
@@ -405,19 +520,15 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
         {/* ---------------- STAGE 1: RADAR SCANNING ---------------- */}
         {stage === 'radar' && (
           <div className="py-8 sm:py-12 flex flex-col items-center text-center space-y-6">
-            {/* Cyber Radar Animation */}
             <div className="relative w-40 h-40 sm:w-48 sm:h-48 flex items-center justify-center">
-              {/* Outer Pulse Rings */}
               <div className="absolute inset-0 rounded-full border border-[#CCFF00]/20 animate-ping" />
               <div className="absolute inset-4 rounded-full border border-[#CCFF00]/40 animate-pulse" />
               <div className="absolute inset-8 rounded-full border border-violet-500/40" />
 
-              {/* Radar Rotating Sweep Line */}
               <div className="absolute inset-0 rounded-full overflow-hidden">
                 <div className="w-full h-full bg-gradient-to-tr from-transparent via-[#CCFF00]/20 to-transparent animate-spin [animation-duration:3s]" />
               </div>
 
-              {/* Center Vibe Pulse Icon */}
               <div className="relative z-10 w-16 h-16 rounded-2xl bg-[#111116] border-2 border-[#CCFF00] flex items-center justify-center text-3xl shadow-glow-lime">
                 ⚡
               </div>
@@ -435,7 +546,6 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
               </p>
             </div>
 
-            {/* User Tags Pulse */}
             <div className="flex flex-wrap gap-1.5 justify-center max-w-sm pt-2">
               {(currentUser.tags || []).slice(0, 4).map((tag) => (
                 <span
@@ -456,7 +566,6 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
               🎉 VIBE MATCH FOUND!
             </span>
 
-            {/* Masked Partner Persona Card */}
             <div className="p-6 rounded-3xl bg-[#111116] border-2 border-violet-500/50 shadow-neo-violet max-w-sm mx-auto space-y-3">
               <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-violet-600 to-indigo-900 border-4 border-[#CCFF00] flex items-center justify-center text-4xl mx-auto shadow-glow-lime animate-bounce">
                 {session.maskedEmoji}
@@ -474,7 +583,6 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
               </p>
             </div>
 
-            {/* Icebreaker Prompt Preview */}
             <div className="p-4 rounded-2xl bg-[#070709] border border-white/10 max-w-md mx-auto text-left">
               <span className="text-[10px] font-mono text-[#CCFF00] uppercase font-bold block mb-1">
                 FIRST DEBATE QUESTION:
@@ -494,14 +602,15 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
         {/* ---------------- STAGE 3: LIVE 3-MINUTE VOICE CALL ---------------- */}
         {stage === 'in_call' && session && (
           <div className="space-y-5 animate-fadeIn">
-            {/* Header: Timer & Bail */}
-            <div className="flex items-center justify-between pb-3 border-b border-white/10">
+            <div className="flex items-center justify-between pb-3 border-b border-white/10 pr-8">
               <div className="flex items-center gap-2">
                 <Timer className="w-5 h-5 text-[#CCFF00] animate-pulse" />
                 <span className="text-xl font-mono font-black text-white tracking-wider">
                   {formattedTime}
                 </span>
-                <span className="text-[11px] font-mono text-white/50">3-Min Blind Date</span>
+                <span className="text-[11px] font-mono text-white/50 hidden sm:inline">
+                  3-Min Blind Date
+                </span>
               </div>
 
               <button
@@ -513,10 +622,8 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
               </button>
             </div>
 
-            {/* Two Call Avatars (Local & Masked Partner) */}
-            <div className="grid grid-cols-2 gap-4 py-2">
-              {/* Local User */}
-              <div className="flex flex-col items-center p-4 rounded-2xl bg-[#111116] border border-white/10 text-center">
+            <div className="grid grid-cols-2 gap-3 sm:gap-4 py-2">
+              <div className="flex flex-col items-center p-3 sm:p-4 rounded-2xl bg-[#111116] border border-white/10 text-center">
                 <div className="relative mb-2">
                   <div
                     className={`w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-gradient-to-tr ${
@@ -537,7 +644,7 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
                     {isMuted ? <MicOff className="w-3 h-3" /> : <Mic className="w-3 h-3" />}
                   </div>
                 </div>
-                <span className="font-heading font-bold text-xs text-white">
+                <span className="font-heading font-bold text-xs text-white truncate max-w-full">
                   You ({currentUser.alias})
                 </span>
                 <span className="text-[10px] font-mono text-white/50">
@@ -545,8 +652,7 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
                 </span>
               </div>
 
-              {/* Masked Partner */}
-              <div className="flex flex-col items-center p-4 rounded-2xl bg-[#111116] border border-violet-500/30 text-center">
+              <div className="flex flex-col items-center p-3 sm:p-4 rounded-2xl bg-[#111116] border border-violet-500/30 text-center">
                 <div className="relative mb-2">
                   <div
                     className={`w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-gradient-to-tr from-violet-600 to-indigo-900 flex items-center justify-center text-3xl transition-all ${
@@ -561,7 +667,7 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
                     <Mic className="w-3 h-3" />
                   </div>
                 </div>
-                <span className="font-heading font-bold text-xs text-white">
+                <span className="font-heading font-bold text-xs text-white truncate max-w-full">
                   {session.maskedAlias} 🔒
                 </span>
                 <span className="text-[10px] font-mono text-[#CCFF00]">
@@ -570,7 +676,6 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
               </div>
             </div>
 
-            {/* Live Debate Question Card with Flip Button */}
             <div className="p-4 rounded-2xl bg-[#070709] border border-white/15 flex items-start justify-between gap-3">
               <div className="space-y-1">
                 <span className="text-[10px] font-mono text-[#CCFF00] uppercase font-bold flex items-center gap-1">
@@ -590,8 +695,7 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
               </button>
             </div>
 
-            {/* Reaction Flying Bar */}
-            <div className="flex items-center justify-center gap-2 py-1">
+            <div className="flex items-center justify-center gap-2 py-1 flex-wrap">
               {['💖', '🔥', '😂', '💀', '👏', '🍕'].map((emoji) => (
                 <button
                   key={emoji}
@@ -603,10 +707,8 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
               ))}
             </div>
 
-            {/* Bottom Controls Bar */}
             <div className="pt-3 border-t border-white/10 flex flex-col sm:flex-row items-center justify-between gap-3">
-              {/* Voice Changer Pills */}
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1 flex-wrap justify-center">
                 {(
                   [
                     { mode: 'natural', label: '🎙️ Clean' },
@@ -628,7 +730,6 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
                 ))}
               </div>
 
-              {/* Mic Toggle Button */}
               <div className="flex items-center gap-2">
                 <button
                   onClick={toggleMic}
@@ -642,10 +743,10 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
                   <span>{isMuted ? 'Unmute' : 'Mute'}</span>
                 </button>
 
-                {/* Match Early if strong chemistry */}
                 {timeLeft < 120 && (
                   <button
                     onClick={() => {
+                      if (callIntervalRef.current) clearInterval(callIntervalRef.current);
                       setStage('verdict');
                       playUiSound('chime');
                     }}
@@ -675,7 +776,6 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
               </p>
             </div>
 
-            {/* Partner Teaser */}
             <div className="p-4 rounded-2xl bg-[#111116] border border-white/10 max-w-xs mx-auto flex items-center justify-center gap-3">
               <span className="text-3xl">{session.maskedEmoji}</span>
               <div className="text-left">
@@ -688,25 +788,31 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
               </div>
             </div>
 
-            {/* Decision Buttons */}
-            <div className="grid grid-cols-2 gap-4 max-w-md mx-auto pt-2">
-              <button
-                onClick={() => handleVerdictSubmit('pass')}
-                className="py-4 rounded-2xl bg-[#15151c] hover:bg-rose-500/20 border border-white/20 hover:border-rose-400 text-white/80 hover:text-rose-300 font-heading font-bold text-sm flex flex-col items-center justify-center gap-1 transition-all"
-              >
-                <span className="text-2xl">👋</span>
-                <span>Pass (Keep Moving)</span>
-              </button>
+            {waitingPartnerVerdict ? (
+              <div className="p-4 rounded-2xl bg-[#CCFF00]/10 border border-[#CCFF00]/40 text-xs font-mono text-[#CCFF00] max-w-sm mx-auto animate-pulse">
+                ✨ You locked W Scene! Syncing partner verdict...
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-3 sm:gap-4 max-w-md mx-auto pt-2">
+                <button
+                  onClick={() => handleVerdictSubmit('pass')}
+                  disabled={isSubmittingVerdict}
+                  className="py-4 rounded-2xl bg-[#15151c] hover:bg-rose-500/20 border border-white/20 hover:border-rose-400 text-white/80 hover:text-rose-300 font-heading font-bold text-sm flex flex-col items-center justify-center gap-1 transition-all disabled:opacity-50"
+                >
+                  <span className="text-2xl">👋</span>
+                  <span>Pass (Keep Moving)</span>
+                </button>
 
-              <button
-                onClick={() => handleVerdictSubmit('w_scene')}
-                disabled={isSubmittingVerdict}
-                className="py-4 rounded-2xl neo-btn-lime text-black font-heading font-black text-sm flex flex-col items-center justify-center gap-1 shadow-neo transition-all disabled:opacity-50"
-              >
-                <span className="text-2xl">❤️</span>
-                <span>{isSubmittingVerdict ? 'Connecting Vibe...' : 'W Scene (I Vibe!)'}</span>
-              </button>
-            </div>
+                <button
+                  onClick={() => handleVerdictSubmit('w_scene')}
+                  disabled={isSubmittingVerdict}
+                  className="py-4 rounded-2xl neo-btn-lime text-black font-heading font-black text-sm flex flex-col items-center justify-center gap-1 shadow-neo transition-all disabled:opacity-50"
+                >
+                  <span className="text-2xl">❤️</span>
+                  <span>{isSubmittingVerdict ? 'Connecting Vibe...' : 'W Scene (I Vibe!)'}</span>
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -726,17 +832,16 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
               </p>
             </div>
 
-            {/* Revealed Partner Profile */}
             <div className="p-5 rounded-3xl bg-[#111116] border-2 border-[#CCFF00] shadow-neo max-w-sm mx-auto flex items-center gap-4 text-left">
               <div
                 className={`w-14 h-14 rounded-2xl bg-gradient-to-tr ${
                   session.partner.avatar.bg
-                } flex items-center justify-center text-2xl shadow-md border border-white/20`}
+                } flex items-center justify-center text-2xl shadow-md border border-white/20 flex-shrink-0`}
               >
                 {session.partner.avatar.emoji}
               </div>
-              <div>
-                <h4 className="font-heading font-black text-white text-base">
+              <div className="min-w-0">
+                <h4 className="font-heading font-black text-white text-base truncate">
                   {session.partner.alias}
                 </h4>
                 <span className="text-xs font-mono text-[#CCFF00] font-bold">
@@ -748,7 +853,6 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
               </div>
             </div>
 
-            {/* Direct DM Button */}
             <div className="pt-2">
               <button
                 onClick={() => {
@@ -772,10 +876,11 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
             <div className="text-4xl">👋</div>
             <div className="space-y-1">
               <h3 className="text-2xl font-heading font-black text-white">
-                No Hard Feelings!
+                {bailNotice ? 'Round Ended' : 'No Hard Feelings!'}
               </h3>
               <p className="text-xs sm:text-sm text-white/60 max-w-sm mx-auto">
-                Finding the right vibe is all about exploring. Your next 3-minute match is just 1 tap away!
+                {bailNotice ||
+                  'Finding the right vibe is all about exploring. Your next 3-minute match is just 1 tap away!'}
               </p>
             </div>
 
@@ -793,9 +898,12 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
               <button
                 onClick={() => {
                   playUiSound('pop');
+                  setBailNotice(null);
                   setStage('radar');
                   setTimeLeft(180);
                   setIsSubmittingVerdict(false);
+                  setWaitingPartnerVerdict(false);
+                  isActiveRef.current = true;
                   radarTimerRef.current = setTimeout(() => {
                     findPartnerAndConnect();
                   }, 4000);
@@ -803,7 +911,7 @@ export const SpeedDateModal: React.FC<SpeedDateModalProps> = ({
                 className="w-full sm:w-auto neo-btn-lime px-6 py-2.5 rounded-xl font-heading font-bold text-xs flex items-center justify-center gap-1.5"
               >
                 <Zap className="w-3.5 h-3.5 fill-black" />
-                <span>⚡ Match With Someone Else</span>
+                <span>Match With Someone Else</span>
               </button>
             </div>
           </div>

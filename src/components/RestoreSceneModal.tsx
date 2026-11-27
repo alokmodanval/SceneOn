@@ -54,7 +54,7 @@ export const RestoreSceneModal: React.FC<RestoreSceneModalProps> = ({
 
       onUserRestored(user);
       onClose();
-    } catch (err: any) {
+    } catch {
       setError('Failed to restore scene. Please try again.');
     } finally {
       setIsLoading(false);
@@ -66,6 +66,7 @@ export const RestoreSceneModal: React.FC<RestoreSceneModalProps> = ({
       <div className="relative w-full max-w-md bg-[#111116] border-2 border-violet-500/80 rounded-2xl p-6 sm:p-8 shadow-neo-violet">
         <button
           onClick={onClose}
+          aria-label="Close restore modal"
           className="absolute top-4 right-4 p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/60 hover:text-white transition-colors"
         >
           <X className="w-5 h-5" />

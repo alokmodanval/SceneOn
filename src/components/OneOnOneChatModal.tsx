@@ -47,6 +47,7 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
   const [messages, setMessages] = useState<SceneMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [creepWarning, setCreepWarning] = useState('');
+  const [chatNotice, setChatNotice] = useState('');
   const [showSocialModal, setShowSocialModal] = useState(false);
   const [socialInputs, setSocialInputs] = useState<UserSocials>({
     instagram: '',
@@ -54,54 +55,104 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
     github: '',
   });
   const [isCalling, setIsCalling] = useState(false);
-  const [hasTriggeredUnlockCelebration, setHasTriggeredUnlockCelebration] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  const [targetAura, setTargetAura] = useState<number>(targetUser.scene_aura ?? 5);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatIdRef = useRef<string | null>(null);
+  const prevCountRef = useRef<number | null>(null);
+  const hasCelebratedRef = useRef<boolean>(false);
+  const aiDelayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const aiTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Initialize or fetch Chat
+  const showNotice = (msg: string) => {
+    setChatNotice(msg);
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = setTimeout(() => setChatNotice(''), 3500);
+  };
+
+  // Initialize or fetch Chat cleanly (once per conversation open)
   useEffect(() => {
     if (!isOpen) return;
 
     let isMounted = true;
+    chatIdRef.current = null;
+    prevCountRef.current = null;
+    hasCelebratedRef.current = false;
+
     getOrCreateChat(currentUser.id, targetUser.id).then((c) => {
       if (!isMounted) return;
+      chatIdRef.current = c.id;
       setChat(c);
+      const mySavedSocials = c.socials_shared?.[currentUser.id];
+      if (mySavedSocials) {
+        setSocialInputs({
+          instagram: mySavedSocials.instagram || '',
+          discord: mySavedSocials.discord || '',
+          github: mySavedSocials.github || '',
+        });
+      }
+
       fetchSceneMessages(c.id).then((msgs) => {
         if (!isMounted) return;
+        prevCountRef.current = msgs.length;
+        if (msgs.length >= 10) {
+          hasCelebratedRef.current = true;
+        }
         setMessages(msgs);
       });
     });
 
-    const handleSync = (e: any) => {
-      if (e.detail?.type === 'new_message' && e.detail.chatId === chat?.id) {
+    const handleSync = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.type === 'new_message' && detail.chatId === chatIdRef.current) {
         setMessages((prev) => {
-          if (prev.some((m) => m.id === e.detail.message.id)) return prev;
-          return [...prev, e.detail.message];
+          if (prev.some((m) => m.id === detail.message.id)) return prev;
+          return [...prev, detail.message];
         });
+      }
+      if (detail?.type === 'socials_updated' && detail.chatId === chatIdRef.current) {
+        setChat((prev) =>
+          prev
+            ? {
+                ...prev,
+                socials_shared: {
+                  ...(prev.socials_shared || {}),
+                  [detail.userId]: detail.socials,
+                },
+              }
+            : prev
+        );
       }
     };
 
     window.addEventListener('sceneon-sync', handleSync);
     return () => {
       isMounted = false;
+      if (aiDelayTimerRef.current) clearTimeout(aiDelayTimerRef.current);
+      if (aiTypingTimerRef.current) clearTimeout(aiTypingTimerRef.current);
+      if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
       window.removeEventListener('sceneon-sync', handleSync);
     };
-  }, [isOpen, currentUser.id, targetUser.id, chat?.id]);
+  }, [isOpen, currentUser.id, targetUser.id]);
 
   // Scroll to bottom on message updates
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, isTyping]);
 
-  // Calculate 10-Message Trust
+  // Celebrate only when trust threshold transitions from <10 to >=10
   const totalMessagesCount = messages.length;
   const isTrustUnlocked = totalMessagesCount >= 10;
 
-  // Trigger celebration once when trust threshold is reached
   useEffect(() => {
-    if (isTrustUnlocked && !hasTriggeredUnlockCelebration) {
-      setHasTriggeredUnlockCelebration(true);
+    if (
+      prevCountRef.current !== null &&
+      isTrustUnlocked &&
+      !hasCelebratedRef.current
+    ) {
+      hasCelebratedRef.current = true;
       playUiSound('unlock');
       confetti({
         particleCount: 70,
@@ -110,12 +161,18 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
         colors: ['#CCFF00', '#FF2E93', '#00F0FF'],
       });
     }
-  }, [isTrustUnlocked, hasTriggeredUnlockCelebration]);
+    if (prevCountRef.current !== null) {
+      prevCountRef.current = totalMessagesCount;
+    }
+  }, [totalMessagesCount, isTrustUnlocked]);
 
   if (!isOpen) return null;
 
-  const handleSendMessage = async (textToSend?: string, msgType: 'text' | 'game_card' = 'text') => {
-    const text = (textToSend || inputText).trim();
+  const handleSendMessage = async (
+    textToSend?: string,
+    msgType: 'text' | 'game_card' = 'text'
+  ) => {
+    const text = (textToSend || inputText).trim().slice(0, 500);
     if (!text || !chat) return;
 
     setCreepWarning('');
@@ -139,27 +196,32 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
     playUiSound('pop');
 
     const newMsg = await sendSceneMessage(chat.id, currentUser.id, text, msgType);
-    setMessages((prev) => [...prev, newMsg]);
+    const updatedHistory = [...messages, newMsg];
+    setMessages((prev) => (prev.some((m) => m.id === newMsg.id) ? prev : [...prev, newMsg]));
 
     // Realistic Groq AI human reply with delay and typing simulation
     if (targetUser.id.startsWith('ai-')) {
-      const isFirstMsg = messages.length === 0;
-      const initialDelay = isFirstMsg ? 3000 : Math.floor(Math.random() * 4500 + 3000);
+      if (aiDelayTimerRef.current) clearTimeout(aiDelayTimerRef.current);
+      if (aiTypingTimerRef.current) clearTimeout(aiTypingTimerRef.current);
 
-      setTimeout(async () => {
+      const isFirstMsg = messages.length === 0;
+      const initialDelay = isFirstMsg ? 2500 : Math.floor(Math.random() * 4000 + 2500);
+      const activeChatId = chat.id;
+
+      aiDelayTimerRef.current = setTimeout(async () => {
         setIsTyping(true);
         const { text: aiReply } = await generateGroqReply(
           targetUser.id,
-          [...messages, newMsg],
+          updatedHistory,
           text
         );
 
-        // Realistic typing duration based on reply length
-        const typingDuration = Math.min(4000, Math.max(1800, aiReply.length * 45));
-        setTimeout(async () => {
+        const typingDuration = Math.min(3500, Math.max(1500, aiReply.length * 40));
+        aiTypingTimerRef.current = setTimeout(async () => {
           setIsTyping(false);
-          const aiMsg = await sendSceneMessage(chat.id, targetUser.id, aiReply, 'text');
-          setMessages((prev) => [...prev, aiMsg]);
+          if (chatIdRef.current !== activeChatId) return;
+          const aiMsg = await sendSceneMessage(activeChatId, targetUser.id, aiReply, 'text');
+          setMessages((prev) => (prev.some((m) => m.id === aiMsg.id) ? prev : [...prev, aiMsg]));
           playUiSound('pop');
         }, typingDuration);
       }, initialDelay);
@@ -177,9 +239,31 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
 
   const handleShareSocials = async () => {
     if (!chat) return;
+    const hasAny =
+      Boolean(socialInputs.instagram?.trim()) ||
+      Boolean(socialInputs.discord?.trim()) ||
+      Boolean(socialInputs.github?.trim());
+
+    if (!hasAny) {
+      showNotice('Enter at least one social handle to share.');
+      return;
+    }
+
     playUiSound('pop');
-    await updateChatSocials(chat.id, currentUser.id, socialInputs);
+    const saved = await updateChatSocials(chat.id, currentUser.id, socialInputs);
+    setChat((prev) =>
+      prev
+        ? {
+            ...prev,
+            socials_shared: {
+              ...(prev.socials_shared || {}),
+              [currentUser.id]: saved,
+            },
+          }
+        : prev
+    );
     setShowSocialModal(false);
+    showNotice('Social handles shared safely!');
     confetti({ particleCount: 40, spread: 50 });
   };
 
@@ -187,9 +271,12 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
     playUiSound('pop');
     const res = await voteAura(targetUser.id, currentUser.id, amount);
     if (!res.success) {
-      alert(res.message);
+      showNotice(res.message || 'Already voted!');
     } else {
-      alert(`Voted! ${amount > 0 ? '+1 W Scene' : '-2 L Creep'}`);
+      if (typeof res.newAura === 'number') {
+        setTargetAura(res.newAura);
+      }
+      showNotice(`Voted! ${amount > 0 ? '+1 W Scene ⚡' : '-2 L Creep 🚩'}`);
     }
   };
 
@@ -200,52 +287,54 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
       <div className="relative w-full max-w-2xl bg-[#111116] sm:border-2 sm:border-[#CCFF00] rounded-none sm:rounded-3xl shadow-neo flex flex-col h-[100dvh] sm:h-[88vh] sm:max-h-[750px] overflow-hidden">
         {/* Header */}
-        <div className="px-5 py-4 border-b border-white/10 bg-[#0D0D12] flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
+        <div className="px-3.5 sm:px-5 py-3.5 sm:py-4 border-b border-white/10 bg-[#0D0D12] flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
             <div
-              className={`w-11 h-11 rounded-full bg-gradient-to-tr ${targetUser.avatar.bg} flex items-center justify-center text-xl border border-white/20`}
+              className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-gradient-to-tr ${targetUser.avatar.bg} flex items-center justify-center text-lg sm:text-xl border border-white/20 flex-shrink-0`}
             >
               {targetUser.avatar.emoji}
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 className="font-heading font-black text-white text-base">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                <h3 className="font-heading font-black text-white text-sm sm:text-base truncate">
                   {targetUser.alias}
                 </h3>
-                <span className="text-[10px] font-mono text-[#CCFF00] px-1.5 py-0.5 rounded bg-[#CCFF00]/10 border border-[#CCFF00]/30">
-                  +{targetUser.scene_aura} Aura
+                <span className="text-[10px] font-mono text-[#CCFF00] px-1.5 py-0.5 rounded bg-[#CCFF00]/10 border border-[#CCFF00]/30 flex-shrink-0">
+                  +{targetAura} Aura
                 </span>
               </div>
-              <span className="text-xs font-mono text-white/50 block">
+              <span className="text-[11px] sm:text-xs font-mono text-white/50 block">
                 {targetUser.is_online ? '🟢 Online right now' : 'Active today'}
               </span>
             </div>
           </div>
 
           {/* Right Header Actions */}
-          <div className="flex items-center gap-2">
-            {/* 1-on-1 Voice Call (Unlocked after 10 messages) */}
+          <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
             <button
               onClick={() => {
                 if (!isTrustUnlocked) {
-                  alert('📞 1-on-1 Voice Call unlocks after reaching 10 messages in Scene Trust!');
+                  showNotice('📞 1-on-1 Voice Call unlocks after 10 messages in Scene Trust!');
                   return;
                 }
                 playUiSound('click');
                 setIsCalling(true);
               }}
               title={isTrustUnlocked ? 'Start P2P Voice Call' : 'Locked until 10 messages'}
-              className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold flex items-center gap-1.5 border transition-all ${
+              className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-mono font-bold flex items-center gap-1.5 border transition-all ${
                 isTrustUnlocked
                   ? 'bg-[#CCFF00] text-black border-black shadow-neo-sm hover:scale-105'
                   : 'bg-white/5 text-white/40 border-white/10 cursor-not-allowed'
               }`}
             >
-              {isTrustUnlocked ? <Phone className="w-3.5 h-3.5 fill-current" /> : <Lock className="w-3.5 h-3.5" />}
+              {isTrustUnlocked ? (
+                <Phone className="w-3.5 h-3.5 fill-current" />
+              ) : (
+                <Lock className="w-3.5 h-3.5" />
+              )}
               <span className="hidden sm:inline">Call</span>
             </button>
 
-            {/* Aura rating pills */}
             <button
               onClick={() => handleAuraVote(1)}
               title="Award W Scene (+1 Aura)"
@@ -261,9 +350,9 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
               🚩
             </button>
 
-            {/* Close */}
             <button
               onClick={onClose}
+              aria-label="Close chat"
               className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-white/60 hover:text-white transition-colors"
             >
               <X className="w-5 h-5" />
@@ -272,22 +361,21 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
         </div>
 
         {/* 10-Message Progressive Trust Progress Bar */}
-        <div className="bg-[#15151c] px-5 py-2.5 border-b border-white/10 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
+        <div className="bg-[#15151c] px-4 sm:px-5 py-2.5 border-b border-white/10 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 flex-shrink-0">
             {isTrustUnlocked ? (
               <Unlock className="w-4 h-4 text-[#CCFF00]" />
             ) : (
               <Lock className="w-4 h-4 text-violet-400" />
             )}
-            <span className="text-xs font-mono font-bold text-white">
+            <span className="text-[11px] sm:text-xs font-mono font-bold text-white">
               Scene Trust:{' '}
               <strong className={isTrustUnlocked ? 'text-[#CCFF00]' : 'text-violet-400'}>
-                {Math.min(10, totalMessagesCount)}/10 Messages
+                {Math.min(10, totalMessagesCount)}/10
               </strong>
             </span>
           </div>
 
-          {/* Glowing bar */}
           <div className="flex-1 max-w-xs h-2 bg-white/10 rounded-full overflow-hidden">
             <div
               className={`h-full transition-all duration-300 ${
@@ -303,35 +391,41 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
                 playUiSound('click');
                 setShowSocialModal(true);
               }}
-              className="text-xs font-mono font-bold text-[#00F0FF] hover:underline flex items-center gap-1"
+              className="text-xs font-mono font-bold text-[#00F0FF] hover:underline flex items-center gap-1 flex-shrink-0"
             >
               <Share2 className="w-3.5 h-3.5" />
-              <span>Socials</span>
+              <span>{sharedByMe ? 'Edit Socials' : 'Socials'}</span>
             </button>
           )}
         </div>
 
-        {/* Mutual Socials Revealed Banner if both shared */}
-        {sharedByTarget && (
-          <div className="bg-[#00F0FF]/10 border-b border-[#00F0FF]/30 px-5 py-2 text-xs font-mono text-[#00F0FF] flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Sparkles className="w-4 h-4" />
+        {/* Notice Banner */}
+        {chatNotice && (
+          <div className="px-4 py-2 bg-[#CCFF00]/10 border-b border-[#CCFF00]/30 text-[#CCFF00] text-xs font-mono text-center animate-fadeIn">
+            {chatNotice}
+          </div>
+        )}
+
+        {/* Mutual Socials Revealed Banner */}
+        {sharedByTarget &&
+          (sharedByTarget.instagram || sharedByTarget.discord || sharedByTarget.github) && (
+            <div className="bg-[#00F0FF]/10 border-b border-[#00F0FF]/30 px-4 sm:px-5 py-2 text-xs font-mono text-[#00F0FF] flex items-center flex-wrap gap-2">
+              <Sparkles className="w-4 h-4 flex-shrink-0" />
               <span>{targetUser.alias} shared socials:</span>
               {sharedByTarget.instagram && <span>IG: {sharedByTarget.instagram}</span>}
               {sharedByTarget.discord && <span>Discord: {sharedByTarget.discord}</span>}
               {sharedByTarget.github && <span>GitHub: {sharedByTarget.github}</span>}
             </div>
-          </div>
-        )}
+          )}
 
-        {/* Icebreaker Prompt Banner (Pinned at top of messages) */}
-        <div className="bg-[#070709] px-5 py-3 border-b border-white/5 flex items-start gap-3">
+        {/* Icebreaker Prompt Banner */}
+        <div className="bg-[#070709] px-4 sm:px-5 py-3 border-b border-white/5 flex items-start gap-3">
           <span className="text-lg">💬</span>
-          <div className="flex-1">
+          <div className="flex-1 min-w-0">
             <span className="text-[10px] font-mono text-[#CCFF00] font-bold block uppercase tracking-wider">
               {targetUser.alias}&apos;s Icebreaker Prompt:
             </span>
-            <p className="text-xs sm:text-sm italic text-white/90">
+            <p className="text-xs sm:text-sm italic text-white/90 break-words">
               &quot;{targetUser.scene_prompt}&quot;
             </p>
           </div>
@@ -342,11 +436,10 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
           {messages.length === 0 && (
             <div className="text-center py-8 space-y-2">
               <span className="text-3xl">⚡</span>
-              <h4 className="font-heading font-bold text-white text-base">
-                Break The Ice!
-              </h4>
+              <h4 className="font-heading font-bold text-white text-base">Break The Ice!</h4>
               <p className="text-xs text-white/50 max-w-sm mx-auto">
-                No &quot;hi/hello&quot; spam. Reply directly to {targetUser.alias}&apos;s icebreaker prompt above to begin.
+                No &quot;hi/hello&quot; spam. Reply directly to {targetUser.alias}&apos;s icebreaker
+                prompt above to begin.
               </p>
             </div>
           )}
@@ -366,13 +459,13 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
                       <Flame className="w-3.5 h-3.5 fill-[#CCFF00]" />
                       <span>SPARK A SCENE GAME CARD</span>
                     </div>
-                    <p className="text-xs sm:text-sm font-medium text-white whitespace-pre-wrap">
+                    <p className="text-xs sm:text-sm font-medium text-white whitespace-pre-wrap break-words">
                       {msg.body}
                     </p>
                   </div>
                 ) : (
                   <div
-                    className={`px-4 py-2.5 rounded-2xl max-w-xs sm:max-w-md text-sm leading-relaxed ${
+                    className={`px-4 py-2.5 rounded-2xl max-w-[85%] sm:max-w-md text-sm leading-relaxed break-words ${
                       isMe
                         ? 'bg-[#CCFF00] text-black font-medium rounded-tr-none'
                         : 'bg-[#15151c] text-white border border-white/10 rounded-tl-none'
@@ -390,7 +483,7 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
               </div>
             );
           })}
-          {/* Animated Human-Like Typing Indicator */}
+
           {isTyping && (
             <div className="flex flex-col items-start animate-fadeIn">
               <div className="px-4 py-2.5 rounded-2xl bg-[#15151c] border border-white/10 rounded-tl-none flex items-center gap-2">
@@ -407,7 +500,7 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Creep Guard Warning Banner if triggered */}
+        {/* Creep Guard Warning Banner */}
         {creepWarning && (
           <div className="px-4 py-2.5 bg-rose-500/15 border-t border-rose-500/40 text-rose-300 text-xs font-mono flex items-center gap-2 animate-fadeIn">
             <ShieldAlert className="w-4 h-4 flex-shrink-0 text-rose-400" />
@@ -424,18 +517,18 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
             }}
             className="flex items-center gap-2"
           >
-            {/* Spark A Scene Game Card Button */}
             <button
               type="button"
               onClick={handleDropSparkGame}
               title="Drop a Spark Game Card (This or That / Hot Take)"
-              className="p-2.5 rounded-xl bg-white/5 hover:bg-[#CCFF00]/15 text-[#CCFF00] border border-white/10 hover:border-[#CCFF00] transition-all"
+              className="p-2.5 rounded-xl bg-white/5 hover:bg-[#CCFF00]/15 text-[#CCFF00] border border-white/10 hover:border-[#CCFF00] transition-all flex-shrink-0"
             >
               <Dices className="w-5 h-5" />
             </button>
 
             <input
               type="text"
+              maxLength={500}
               value={inputText}
               onChange={(e) => {
                 setInputText(e.target.value);
@@ -443,16 +536,17 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
               }}
               placeholder={
                 messages.length === 0
-                  ? `Reply to "${targetUser.scene_prompt.slice(0, 30)}..." (min 10 chars)`
+                  ? `Reply to "${targetUser.scene_prompt.slice(0, 26)}..." (min 10 chars)`
                   : 'Type your message...'
               }
-              className="flex-1 px-4 py-3 rounded-xl bg-[#070709] border border-white/20 focus:border-[#CCFF00] text-white text-sm outline-none transition-colors"
+              className="flex-1 min-w-0 px-3.5 sm:px-4 py-2.5 sm:py-3 rounded-xl bg-[#070709] border border-white/20 focus:border-[#CCFF00] text-white text-sm outline-none transition-colors"
             />
 
             <button
               type="submit"
-              disabled={!inputText.trim()}
-              className="neo-btn-lime p-3 rounded-xl disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+              disabled={!inputText.trim() || !chat}
+              aria-label="Send message"
+              className="neo-btn-lime p-3 rounded-xl disabled:opacity-40 disabled:cursor-not-allowed transition-all flex-shrink-0"
             >
               <Send className="w-4 h-4 fill-black" />
             </button>
@@ -477,7 +571,8 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
               </button>
             </div>
             <p className="text-xs text-white/60">
-              You achieved 10-message trust! Enter handles you are comfortable revealing to {targetUser.alias}.
+              You achieved 10-message trust! Enter handles you are comfortable revealing to{' '}
+              {targetUser.alias}.
             </p>
 
             <div className="space-y-3">
@@ -489,6 +584,7 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
                   <Camera className="w-4 h-4 text-pink-400" />
                   <input
                     type="text"
+                    maxLength={60}
                     value={socialInputs.instagram || ''}
                     onChange={(e) =>
                       setSocialInputs({ ...socialInputs, instagram: e.target.value })
@@ -507,6 +603,7 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
                   <MessageSquare className="w-4 h-4 text-violet-400" />
                   <input
                     type="text"
+                    maxLength={60}
                     value={socialInputs.discord || ''}
                     onChange={(e) =>
                       setSocialInputs({ ...socialInputs, discord: e.target.value })
@@ -525,6 +622,7 @@ export const OneOnOneChatModal: React.FC<OneOnOneChatModalProps> = ({
                   <Code2 className="w-4 h-4 text-white" />
                   <input
                     type="text"
+                    maxLength={60}
                     value={socialInputs.github || ''}
                     onChange={(e) =>
                       setSocialInputs({ ...socialInputs, github: e.target.value })

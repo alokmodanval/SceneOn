@@ -4,6 +4,7 @@ import { SceneRoom, SceneUser } from '../types';
 import { ALL_TAGS, TOPIC_DECK } from '../lib/constants';
 import { upsertSceneRoom } from '../lib/supabase';
 import { playUiSound } from '../lib/audioEngine';
+import { generateSecurePin } from '../lib/identity';
 import confetti from 'canvas-confetti';
 
 interface HostRoomModalProps {
@@ -32,7 +33,7 @@ export const HostRoomModal: React.FC<HostRoomModalProps> = ({
   const [vibeTag, setVibeTag] = useState(ALL_TAGS[0]);
   const [topic, setTopic] = useState(TOPIC_DECK[0]);
   const [isPrivate, setIsPrivate] = useState(false);
-  const [roomPin, setRoomPin] = useState(() => Math.floor(1000 + Math.random() * 9000).toString());
+  const [roomPin, setRoomPin] = useState(() => generateSecurePin());
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
 
@@ -40,7 +41,7 @@ export const HostRoomModal: React.FC<HostRoomModalProps> = ({
 
   const handleGenerateNewPin = () => {
     playUiSound('pop');
-    setRoomPin(Math.floor(1000 + Math.random() * 9000).toString());
+    setRoomPin(generateSecurePin());
   };
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -96,7 +97,7 @@ export const HostRoomModal: React.FC<HostRoomModalProps> = ({
 
       onRoomCreated(newRoom);
       onClose();
-    } catch (err) {
+    } catch {
       setError('Could not create room. Please try again.');
     } finally {
       setIsSubmitting(false);
@@ -108,6 +109,7 @@ export const HostRoomModal: React.FC<HostRoomModalProps> = ({
       <div className="relative w-full max-w-lg bg-[#111116] border-2 border-[#CCFF00] rounded-3xl p-5 sm:p-7 shadow-neo max-h-[92dvh] overflow-y-auto">
         <button
           onClick={onClose}
+          aria-label="Close host modal"
           className="absolute top-4 right-4 p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/60 hover:text-white transition-colors"
         >
           <X className="w-5 h-5" />

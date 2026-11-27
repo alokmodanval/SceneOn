@@ -90,7 +90,7 @@ export async function generateStoryCardBlob(user: SceneUser): Promise<string> {
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = '#FFFFFF';
   ctx.font = 'bold 54px "Space Grotesk", sans-serif';
-  ctx.fillText(user.alias, 350, 310);
+  ctx.fillText(user.alias, 350, 310, 365);
 
   ctx.fillStyle = '#CCFF00';
   ctx.font = 'bold 24px "JetBrains Mono", monospace';
@@ -160,8 +160,8 @@ export async function generateStoryCardBlob(user: SceneUser): Promise<string> {
     pillX += pillW + 20;
   });
 
-  // 10. Vibe Sliders Section
-  const sliderStartY = 970;
+  // 10. Vibe Sliders Section (positioned dynamically below interest tags to prevent collision)
+  const sliderStartY = Math.max(970, pillY + 95);
   ctx.fillStyle = '#00F0FF';
   ctx.font = 'bold 24px "JetBrains Mono", monospace';
   ctx.fillText('VIBE FREQUENCIES //', 130, sliderStartY);

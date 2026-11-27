@@ -1,25 +1,20 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Mic,
   MicOff,
   PhoneOff,
   Volume2,
-  Sparkles,
   Users,
-  ShieldAlert,
   Dices,
   Sliders,
   CloudRain,
   Coffee,
   Radio,
-  Zap,
   Lock,
   Unlock,
   Share2,
-  Copy,
   Check,
   Crown,
-  Hand,
   MessageSquare,
   Send,
   Music,
@@ -44,8 +39,6 @@ import {
 } from '../lib/audioEngine';
 import { WebRTCMeshRoom } from '../lib/webrtcMesh';
 import { TOPIC_DECK } from '../lib/constants';
-import { voteAura } from '../lib/supabase';
-import confetti from 'canvas-confetti';
 
 interface VoiceRoomActiveProps {
   room: SceneRoom;
@@ -69,26 +62,30 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
   onLeaveRoom,
   onUpdateRoom,
 }) => {
-  // Determine if current user is host
   const isHost = room.host_id === currentUser.id || room.participants[0]?.id === currentUser.id;
-
-  // Find my current seat
   const myExistingParticipant = room.participants.find((p) => p.id === currentUser.id);
   const myInitialRole: 'host' | 'speaker' | 'listener' = isHost
     ? 'host'
     : myExistingParticipant?.role || (room.participants.length < 6 ? 'speaker' : 'listener');
   const myInitialSeat = isHost ? 1 : myExistingParticipant?.seat_number || 2;
 
-  // Local user stage state
   const [myRole, setMyRole] = useState<'host' | 'speaker' | 'listener'>(myInitialRole);
-  const [mySeat, setMySeat] = useState<number | undefined>(myInitialRole !== 'listener' ? myInitialSeat : undefined);
   const [isMuted, setIsMuted] = useState(true);
   const [voiceFilter, setVoiceFilter] = useState<VoiceFilterMode>('natural');
   const [isLocalSpeaking, setIsLocalSpeaking] = useState(false);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
-  const [handRaised, setHandRaised] = useState(false);
+  const [roomNotice, setRoomNotice] = useState<string | null>(null);
 
-  // Room state
+  const isMutedRef = useRef(isMuted);
+  const myRoleRef = useRef(myRole);
+  const initialRoleRef = useRef(myInitialRole);
+  const initialSeatRef = useRef(myInitialSeat);
+
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+    myRoleRef.current = myRole;
+  }, [isMuted, myRole]);
+
   const [participants, setParticipants] = useState<RoomParticipant[]>(() => {
     const list = [...(room.participants || [])];
     const exists = list.find((p) => p.id === currentUser.id);
@@ -113,8 +110,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
   const [floatingReactions, setFloatingReactions] = useState<{ id: string; emoji: string; x: number }[]>([]);
   const [djAnnouncement, setDjAnnouncement] = useState<string | null>(null);
 
-  // In-room live chat messages
-  const [chatMessages, setChatMessages] = useState<RoomChatMessage[]>([
+  const [chatMessages, setChatMessages] = useState<RoomChatMessage[]>(() => [
     {
       id: 'welcome',
       sender_id: 'system',
@@ -126,159 +122,218 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
   const [chatInput, setChatInput] = useState('');
   const [showChatBox, setShowChatBox] = useState(false);
 
-  // Ambient sound mixer state
   const [ambientType, setAmbientType] = useState<AmbientSoundType>('none');
   const [ambientVol, setAmbientVol] = useState(14);
   const [showAmbientMenu, setShowAmbientMenu] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
 
-  // Audio & WebRTC references
   const rawStreamRef = useRef<MediaStream | null>(null);
   const filterPipelineRef = useRef<VoiceFilterPipeline | null>(null);
   const meshRoomRef = useRef<WebRTCMeshRoom | null>(null);
   const meterCleanupRef = useRef<(() => void) | null>(null);
   const remoteMetersRef = useRef<Map<string, () => void>>(new Map());
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Initialize WebRTC Mesh
+  const showNotice = useCallback((msg: string) => {
+    setRoomNotice(msg);
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = setTimeout(() => setRoomNotice(null), 3500);
+  }, []);
+
+  const triggerFloatingReaction = useCallback((emoji: string) => {
+    const id = `${Date.now()}-${Math.random()}`;
+    const x = Math.random() * 80 + 10;
+    setFloatingReactions((prev) => [...prev, { id, emoji, x }]);
+    setTimeout(() => {
+      setFloatingReactions((prev) => prev.filter((r) => r.id !== id));
+    }, 2000);
+  }, []);
+
+  const attachLocalMicrophone = useCallback(async (): Promise<MediaStream> => {
+    if (rawStreamRef.current && filterPipelineRef.current) {
+      return filterPipelineRef.current.outputStream;
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false,
+    });
+    rawStreamRef.current = stream;
+    stream.getAudioTracks().forEach((t) => (t.enabled = !isMutedRef.current));
+
+    const pipeline = createVoiceFilterPipeline(stream);
+    filterPipelineRef.current = pipeline;
+
+    if (meterCleanupRef.current) meterCleanupRef.current();
+    meterCleanupRef.current = createVolumeMeter(stream, (_level, isSpeaking) => {
+      const speakingActive = isSpeaking && !isMutedRef.current;
+      setIsLocalSpeaking(speakingActive);
+      meshRoomRef.current?.broadcastSpeaking(speakingActive);
+    });
+
+    if (meshRoomRef.current) {
+      meshRoomRef.current.updateLocalStream(pipeline.outputStream);
+    }
+
+    return pipeline.outputStream;
+  }, []);
+
   useEffect(() => {
     let isCancelled = false;
 
     async function initAudioAndMesh() {
-      // Step 1: Start with a silent dummy stream so audience listeners can join without permission prompts
       let audioStream: MediaStream;
+      let effectiveRole = initialRoleRef.current;
+      let effectiveSeat: number | undefined =
+        effectiveRole !== 'listener' ? initialSeatRef.current : undefined;
+
       try {
-        if (myRole !== 'listener') {
-          // If on stage, request mic
-          audioStream = await navigator.mediaDevices.getUserMedia({
-            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-            video: false,
-          });
-          rawStreamRef.current = audioStream;
-
-          // Mute by default
-          audioStream.getAudioTracks().forEach((t) => (t.enabled = false));
-
-          // Set up filter pipeline
-          const pipeline = createVoiceFilterPipeline(audioStream);
-          filterPipelineRef.current = pipeline;
-
-          // Meter for local speaking
-          meterCleanupRef.current = createVolumeMeter(audioStream, (_level, isSpeaking) => {
-            setIsLocalSpeaking(isSpeaking && !isMuted);
-            if (meshRoomRef.current) {
-              meshRoomRef.current.broadcastSpeaking(isSpeaking && !isMuted);
-            }
-          });
-
-          audioStream = pipeline.outputStream;
+        if (effectiveRole !== 'listener') {
+          audioStream = await attachLocalMicrophone();
         } else {
           audioStream = createSilentAudioStream();
         }
       } catch (err) {
         console.warn('Microphone not acquired, continuing in listen-only mode:', err);
         audioStream = createSilentAudioStream();
+        effectiveRole = 'listener';
+        effectiveSeat = undefined;
         setMyRole('listener');
-        setMySeat(undefined);
+        myRoleRef.current = 'listener';
+        showNotice('Mic not available — joined as listener. Tap any seat to request mic.');
       }
 
       if (isCancelled) return;
 
-      // Step 2: Initialize WebRTC mesh room with PeerJS
-      const mesh = new WebRTCMeshRoom(room.id, currentUser.id, currentUser.alias, {
-        onRemoteStream: (peerId, remoteStream) => {
-          // Attach volume meter to remote stream to animate speaking ring
-          const cleanup = createVolumeMeter(remoteStream, (_level, isSpeaking) => {
+      const mesh = new WebRTCMeshRoom(
+        room.id,
+        currentUser.id,
+        currentUser.alias,
+        {
+          onRemoteStream: (peerId, remoteStream, mappedUserId) => {
+            const targetId = mappedUserId || peerId;
+            const prevCleanup = remoteMetersRef.current.get(peerId);
+            if (prevCleanup) prevCleanup();
+            const cleanup = createVolumeMeter(remoteStream, (_level, isSpeaking) => {
+              setParticipants((prev) =>
+                prev.map((p) => (p.id === targetId ? { ...p, is_speaking: isSpeaking } : p))
+              );
+            });
+            remoteMetersRef.current.set(peerId, cleanup);
+          },
+          onPeerLeave: (peerId, leftUserId) => {
+            const target = leftUserId || peerId;
+            setParticipants((prev) => prev.filter((p) => p.id !== target));
+            const cleanup = remoteMetersRef.current.get(peerId);
+            if (cleanup) {
+              cleanup();
+              remoteMetersRef.current.delete(peerId);
+            }
+          },
+          onPeerJoin: (p) => {
+            setParticipants((prev) => {
+              const id = p.id || p.peerId;
+              if (prev.some((x) => x.id === id)) return prev;
+              return [
+                ...prev,
+                {
+                  id,
+                  alias: p.alias || 'GenZ Friend',
+                  avatar: p.avatar || { bg: 'from-violet-600 to-indigo-900', emoji: '⚡' },
+                  is_muted: p.is_muted ?? true,
+                  is_speaking: false,
+                  voice_filter: 'natural',
+                  role: p.role || 'speaker',
+                  seat_number: p.seat_number,
+                  joined_at: new Date().toISOString(),
+                },
+              ];
+            });
+          },
+          onPeerMuteChange: (userId, peerMuted) => {
             setParticipants((prev) =>
-              prev.map((p) => (p.id === peerId ? { ...p, is_speaking: isSpeaking } : p))
+              prev.map((p) =>
+                p.id === userId
+                  ? { ...p, is_muted: peerMuted, is_speaking: peerMuted ? false : p.is_speaking }
+                  : p
+              )
             );
-          });
-          remoteMetersRef.current.set(peerId, cleanup);
+          },
+          onReaction: (emoji) => {
+            triggerFloatingReaction(emoji);
+          },
+          onDjSound: (sound, senderAlias) => {
+            playDjSound(sound);
+            setDjAnnouncement(`🎛️ ${senderAlias} played ${sound.toUpperCase()}!`);
+            setTimeout(() => setDjAnnouncement(null), 3000);
+          },
+          onRoomChat: (msg) => {
+            setChatMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+            playUiSound('pop');
+          },
+          onTopicChange: (newTopic) => {
+            setActiveTopic(newTopic);
+          },
+          onPeerSpeaking: (userId, speaking) => {
+            setParticipants((prev) =>
+              prev.map((p) => (p.id === userId ? { ...p, is_speaking: speaking } : p))
+            );
+          },
+          onSeatChange: (userId, seat_number, role) => {
+            setParticipants((prev) =>
+              prev.map((p) => (p.id === userId ? { ...p, seat_number, role } : p))
+            );
+          },
+          onLockSeat: (seat_num, isLocked) => {
+            setLockedSeats((prev) =>
+              isLocked ? (prev.includes(seat_num) ? prev : [...prev, seat_num]) : prev.filter((s) => s !== seat_num)
+            );
+          },
         },
-        onPeerLeave: (peerId, leftUserId) => {
-          const target = leftUserId || peerId;
-          setParticipants((prev) => prev.filter((p) => p.id !== target));
-          const cleanup = remoteMetersRef.current.get(peerId);
-          if (cleanup) {
-            cleanup();
-            remoteMetersRef.current.delete(peerId);
-          }
-        },
-        onPeerJoin: (p) => {
-          setParticipants((prev) => {
-            if (prev.some((x) => x.id === p.id)) return prev;
-            return [
-              ...prev,
-              {
-                id: p.id || p.peerId,
-                alias: p.alias || 'GenZ Friend',
-                avatar: p.avatar || { bg: 'from-violet-600 to-indigo-900', emoji: '⚡' },
-                is_muted: true,
-                is_speaking: false,
-                voice_filter: 'natural',
-                role: p.role || 'speaker',
-                seat_number: p.seat_number,
-                joined_at: new Date().toISOString(),
-              },
-            ];
-          });
-        },
-        onReaction: (emoji) => {
-          triggerFloatingReaction(emoji);
-        },
-        onDjSound: (sound, senderAlias) => {
-          playDjSound(sound);
-          setDjAnnouncement(`🎛️ ${senderAlias} played ${sound.toUpperCase()}!`);
-          setTimeout(() => setDjAnnouncement(null), 3000);
-        },
-        onRoomChat: (msg) => {
-          setChatMessages((prev) => [...prev, msg]);
-          playUiSound('pop');
-        },
-        onTopicChange: (newTopic) => {
-          setActiveTopic(newTopic);
-        },
-        onPeerSpeaking: (peerId, speaking) => {
-          setParticipants((prev) =>
-            prev.map((p) => (p.id === peerId ? { ...p, is_speaking: speaking } : p))
-          );
-        },
-        onSeatChange: (userId, seat_number, role) => {
-          setParticipants((prev) =>
-            prev.map((p) => (p.id === userId ? { ...p, seat_number, role } : p))
-          );
-        },
-        onLockSeat: (seat_num, isLocked) => {
-          setLockedSeats((prev) =>
-            isLocked ? [...prev, seat_num] : prev.filter((s) => s !== seat_num)
-          );
-        },
-      });
+        currentUser.avatar,
+        true
+      );
 
       meshRoomRef.current = mesh;
-      await mesh.start(audioStream, myInitialRole, myInitialSeat);
+      await mesh.start(audioStream, effectiveRole, effectiveSeat);
     }
 
     initAudioAndMesh();
 
+    const remoteMetersMap = remoteMetersRef.current;
+
     return () => {
       isCancelled = true;
+      if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
       if (rawStreamRef.current) {
         rawStreamRef.current.getTracks().forEach((t) => t.stop());
+        rawStreamRef.current = null;
       }
       if (filterPipelineRef.current) {
         filterPipelineRef.current.cleanup();
+        filterPipelineRef.current = null;
       }
       if (meterCleanupRef.current) {
         meterCleanupRef.current();
+        meterCleanupRef.current = null;
       }
-      remoteMetersRef.current.forEach((cleanup) => cleanup());
-      remoteMetersRef.current.clear();
+      remoteMetersMap.forEach((cleanup) => cleanup());
+      remoteMetersMap.clear();
       if (meshRoomRef.current) {
         meshRoomRef.current.leave();
+        meshRoomRef.current = null;
       }
       ambientMixer.stop();
     };
-  }, [room.id, currentUser.id, currentUser.alias]);
+  }, [
+    room.id,
+    currentUser.id,
+    currentUser.alias,
+    currentUser.avatar,
+    attachLocalMicrophone,
+    triggerFloatingReaction,
+    showNotice,
+  ]);
 
   const toggleMicRef = useRef<(forceState?: boolean) => Promise<void>>(async () => {});
 
@@ -286,7 +341,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      if (e.code === 'Space' && !e.repeat && isMuted && myRole !== 'listener') {
+      if (e.code === 'Space' && !e.repeat && isMutedRef.current && myRoleRef.current !== 'listener') {
         e.preventDefault();
         setIsSpacePressed(true);
         toggleMicRef.current(false);
@@ -295,7 +350,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
 
     const handleKeyUp = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      if (e.code === 'Space' && myRole !== 'listener') {
+      if (e.code === 'Space' && myRoleRef.current !== 'listener') {
         e.preventDefault();
         setIsSpacePressed(false);
         toggleMicRef.current(true);
@@ -308,36 +363,28 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [isMuted, myRole]);
+  }, []);
 
-  // Toggle Microphone
-  const toggleMic = async (forceState?: boolean) => {
-    if (myRole === 'listener') {
-      alert('You are currently listening. Take a mic seat above to speak!');
+  const toggleMic = useCallback(async (forceState?: boolean) => {
+    if (myRoleRef.current === 'listener') {
+      showNotice('Tap any open seat above to grab a microphone!');
       return;
     }
 
-    const nextState = forceState !== undefined ? forceState : !isMuted;
+    const nextState = forceState !== undefined ? forceState : !isMutedRef.current;
 
-    // If we don't have mic tracks yet, acquire mic now
     if (!rawStreamRef.current && !nextState) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        });
-        rawStreamRef.current = stream;
-        const pipeline = createVoiceFilterPipeline(stream);
-        filterPipelineRef.current = pipeline;
-        if (meshRoomRef.current) {
-          meshRoomRef.current.updateLocalStream(pipeline.outputStream);
-        }
-      } catch (err) {
-        alert('Microphone permission needed to speak.');
+        await attachLocalMicrophone();
+      } catch {
+        showNotice('Microphone permission needed to speak.');
         return;
       }
     }
 
     setIsMuted(nextState);
+    isMutedRef.current = nextState;
+    if (nextState) setIsLocalSpeaking(false);
 
     if (rawStreamRef.current) {
       rawStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = !nextState));
@@ -346,86 +393,94 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
       filterPipelineRef.current.outputStream.getAudioTracks().forEach((t) => (t.enabled = !nextState));
     }
 
+    meshRoomRef.current?.broadcastMuteState(nextState);
     playUiSound('pop');
     setParticipants((prev) =>
-      prev.map((p) => (p.id === currentUser.id ? { ...p, is_muted: nextState } : p))
+      prev.map((p) =>
+        p.id === currentUser.id
+          ? { ...p, is_muted: nextState, is_speaking: nextState ? false : p.is_speaking }
+          : p
+      )
     );
-  };
-  toggleMicRef.current = toggleMic;
+  }, [attachLocalMicrophone, currentUser.id, showNotice]);
 
-  // Change Voice Filter
+  useEffect(() => {
+    toggleMicRef.current = toggleMic;
+  }, [toggleMic]);
+
   const handleFilterChange = (mode: VoiceFilterMode) => {
     playUiSound('click');
     setVoiceFilter(mode);
-    if (filterPipelineRef.current) {
-      filterPipelineRef.current.setMode(mode);
-    }
+    filterPipelineRef.current?.setMode(mode);
   };
 
-  // Take a specific seat (or general take mic)
   const handleTakeSeat = async (seatNum: number) => {
     playUiSound('click');
     if (lockedSeats.includes(seatNum)) {
-      alert(`Seat #${seatNum} is locked by the room host.`);
+      showNotice(`Seat #${seatNum} is locked by the room host.`);
+      return;
+    }
+
+    const occupiedByOther = participants.some(
+      (p) =>
+        p.id !== currentUser.id &&
+        (p.role === 'host' || p.role === 'speaker') &&
+        (p.seat_number || 1) === seatNum
+    );
+    if (occupiedByOther) {
+      showNotice(`Seat #${seatNum} is already occupied.`);
       return;
     }
 
     try {
-      if (!rawStreamRef.current) {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        });
-        rawStreamRef.current = stream;
-        stream.getAudioTracks().forEach((t) => (t.enabled = false));
-        const pipeline = createVoiceFilterPipeline(stream);
-        filterPipelineRef.current = pipeline;
-        if (meshRoomRef.current) {
-          meshRoomRef.current.updateLocalStream(pipeline.outputStream);
-        }
-      }
+      await attachLocalMicrophone();
     } catch {
-      alert('Could not access microphone.');
+      showNotice('Could not access microphone permission.');
       return;
     }
 
-    setMyRole('speaker');
-    setMySeat(seatNum);
+    const nextRole = isHost && seatNum === 1 ? 'host' : 'speaker';
+    setMyRole(nextRole);
+    myRoleRef.current = nextRole;
     setIsMuted(true);
+    isMutedRef.current = true;
 
-    if (meshRoomRef.current) {
-      meshRoomRef.current.broadcastSeatChange(seatNum, 'speaker');
-    }
+    meshRoomRef.current?.broadcastSeatChange(seatNum, nextRole);
+    meshRoomRef.current?.broadcastMuteState(true);
 
     setParticipants((prev) =>
       prev.map((p) =>
-        p.id === currentUser.id ? { ...p, role: 'speaker', seat_number: seatNum, is_muted: true } : p
+        p.id === currentUser.id
+          ? { ...p, role: nextRole, seat_number: seatNum, is_muted: true, is_speaking: false }
+          : p
       )
     );
   };
 
-  // Step down to audience
   const handleStepDown = () => {
     playUiSound('click');
     setMyRole('listener');
-    setMySeat(undefined);
+    myRoleRef.current = 'listener';
     setIsMuted(true);
+    isMutedRef.current = true;
+    setIsLocalSpeaking(false);
 
     if (rawStreamRef.current) {
       rawStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = false));
     }
 
-    if (meshRoomRef.current) {
-      meshRoomRef.current.broadcastSeatChange(undefined, 'listener');
-    }
+    meshRoomRef.current?.broadcastSeatChange(undefined, 'listener');
+    meshRoomRef.current?.broadcastMuteState(true);
 
     setParticipants((prev) =>
       prev.map((p) =>
-        p.id === currentUser.id ? { ...p, role: 'listener', seat_number: undefined, is_muted: true } : p
+        p.id === currentUser.id
+          ? { ...p, role: 'listener', seat_number: undefined, is_muted: true, is_speaking: false }
+          : p
       )
     );
   };
 
-  // Lock / Unlock seat (Host only)
   const handleToggleLockSeat = (seatNum: number) => {
     if (!isHost) return;
     playUiSound('pop');
@@ -435,40 +490,22 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
       : [...lockedSeats, seatNum];
 
     setLockedSeats(updated);
-    if (meshRoomRef.current) {
-      meshRoomRef.current.broadcastLockSeat(seatNum, !isCurrentlyLocked);
-    }
+    meshRoomRef.current?.broadcastLockSeat(seatNum, !isCurrentlyLocked);
   };
 
-  // Play DJ Soundboard SFX
   const handleTriggerDjSound = (type: DjSoundType) => {
     playDjSound(type);
-    if (meshRoomRef.current) {
-      meshRoomRef.current.sendDjSound(type);
-    }
+    meshRoomRef.current?.sendDjSound(type);
     setDjAnnouncement(`🎛️ You played ${type.toUpperCase()}!`);
     setTimeout(() => setDjAnnouncement(null), 2500);
   };
 
-  // Trigger floating reaction emoji
   const handleSendReaction = (emoji: string) => {
     playUiSound('reaction');
     triggerFloatingReaction(emoji);
-    if (meshRoomRef.current) {
-      meshRoomRef.current.sendReaction(emoji);
-    }
+    meshRoomRef.current?.sendReaction(emoji);
   };
 
-  const triggerFloatingReaction = (emoji: string) => {
-    const id = `${Date.now()}-${Math.random()}`;
-    const x = Math.random() * 80 + 10;
-    setFloatingReactions((prev) => [...prev, { id, emoji, x }]);
-    setTimeout(() => {
-      setFloatingReactions((prev) => prev.filter((r) => r.id !== id));
-    }, 2000);
-  };
-
-  // Send in-room chat message
   const handleSendChat = (e: React.FormEvent) => {
     e.preventDefault();
     if (!chatInput.trim() || !meshRoomRef.current) return;
@@ -478,24 +515,19 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
     playUiSound('pop');
   };
 
-  // Flip discussion topic
   const handleFlipTopic = () => {
     playUiSound('pop');
     const remaining = TOPIC_DECK.filter((t) => t !== activeTopic);
     const nextTopic = remaining[Math.floor(Math.random() * remaining.length)] || TOPIC_DECK[0];
     setActiveTopic(nextTopic);
 
-    if (meshRoomRef.current) {
-      meshRoomRef.current.broadcastTopic(nextTopic);
-    }
-
+    meshRoomRef.current?.broadcastTopic(nextTopic);
     onUpdateRoom({
       ...room,
       active_topic: nextTopic,
     });
   };
 
-  // Ambient sound selector
   const handleAmbientChange = (type: AmbientSoundType) => {
     playUiSound('click');
     setAmbientType(type);
@@ -507,20 +539,21 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
     ambientMixer.setVolume(vol);
   };
 
-  // Copy shareable room link
   const handleCopyInvite = () => {
     const url = `${window.location.origin}/?room=${room.id}${
       room.is_private && room.room_pin ? `&pin=${room.room_pin}` : ''
     }`;
-    navigator.clipboard.writeText(url);
+    navigator.clipboard?.writeText(url).catch(() => {});
     setCopiedLink(true);
     playUiSound('click');
     setTimeout(() => setCopiedLink(false), 2000);
   };
 
-  // Stage speakers vs Listeners
   const speakers = participants.filter((p) => p.role === 'host' || p.role === 'speaker');
   const listeners = participants.filter((p) => p.role === 'listener');
+  const firstOpenSeat = [1, 2, 3, 4, 5, 6].find(
+    (s) => !lockedSeats.includes(s) && !speakers.some((p) => (p.seat_number || 1) === s)
+  );
 
   return (
     <div className="relative w-full max-w-5xl mx-auto rounded-3xl bg-[#0D0D12] border-2 border-[#CCFF00] p-4 sm:p-7 shadow-neo overflow-hidden animate-fadeIn">
@@ -539,14 +572,14 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
 
       {/* Top DJ Announcement Banner */}
       {djAnnouncement && (
-        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 bg-[#CCFF00] text-black font-mono font-black text-xs px-4 py-1.5 rounded-full shadow-neo animate-bounce">
+        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 bg-[#CCFF00] text-black font-mono font-black text-xs px-4 py-1.5 rounded-full shadow-neo animate-bounce whitespace-nowrap">
           {djAnnouncement}
         </div>
       )}
 
       {/* Header Bar */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-5 border-b border-white/10">
-        <div className="space-y-1">
+        <div className="space-y-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="flex h-2.5 w-2.5 relative">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#CCFF00] opacity-75"></span>
@@ -556,7 +589,9 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
             {room.is_private ? (
               <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded-full bg-violet-500/20 text-violet-300 border border-violet-500/40 flex items-center gap-1">
                 <Lock className="w-3 h-3" />
-                <span>PRIVATE VIP POD • PIN: {room.room_pin}</span>
+                <span>
+                  PRIVATE VIP POD{isHost && room.room_pin ? ` • PIN: ${room.room_pin}` : ''}
+                </span>
               </span>
             ) : (
               <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
@@ -569,24 +604,21 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
             </span>
           </div>
 
-          <h2 className="text-xl sm:text-2xl font-heading font-black text-white">
+          <h2 className="text-xl sm:text-2xl font-heading font-black text-white break-words">
             {room.title}
           </h2>
         </div>
 
-        {/* Right Header Actions */}
         <div className="flex items-center gap-2 self-stretch sm:self-auto justify-end flex-wrap">
-          {/* Share Link */}
           <button
             onClick={handleCopyInvite}
             title="Copy 1-Click Invite Link"
             className="px-3 py-1.5 rounded-xl text-xs font-mono bg-white/5 hover:bg-white/10 text-white/80 hover:text-white border border-white/10 flex items-center gap-1.5 transition-all"
           >
             {copiedLink ? <Check className="w-3.5 h-3.5 text-[#CCFF00]" /> : <Share2 className="w-3.5 h-3.5" />}
-            <span className="hidden sm:inline">{copiedLink ? 'Copied Link!' : 'Invite Friends'}</span>
+            <span>{copiedLink ? 'Copied!' : 'Invite'}</span>
           </button>
 
-          {/* Ambient BGM Mixer */}
           <div className="relative">
             <button
               onClick={() => {
@@ -612,7 +644,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
             </button>
 
             {showAmbientMenu && (
-              <div className="absolute right-0 mt-2 w-64 p-3 rounded-2xl bg-[#15151c] border border-white/20 shadow-neo z-50 space-y-3">
+              <div className="absolute right-0 mt-2 w-64 max-w-[calc(100vw-2rem)] p-3 rounded-2xl bg-[#15151c] border border-white/20 shadow-neo z-50 space-y-3">
                 <span className="text-[11px] font-mono text-white/60 block font-bold">
                   ROOM AMBIENT VIBE SYNTH
                 </span>
@@ -682,7 +714,6 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
             )}
           </div>
 
-          {/* Leave Button */}
           <button
             onClick={() => {
               playUiSound('click');
@@ -695,6 +726,13 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Inline Room Notice Toast */}
+      {roomNotice && (
+        <div className="mt-4 p-3 rounded-xl bg-amber-500/15 border border-amber-400/40 text-amber-200 text-xs font-mono text-center animate-fadeIn">
+          ⚡ {roomNotice}
+        </div>
+      )}
 
       {/* Discussion Topic Card */}
       <div className="my-4 p-4 rounded-2xl bg-[#111116] border border-white/15 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
@@ -716,9 +754,9 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
         </button>
       </div>
 
-      {/* Hello Yo-Style 6-Seat Interactive Stage Grid */}
+      {/* 6-Seat Interactive Stage Grid */}
       <div className="my-5">
-        <div className="flex items-center justify-between mb-3 text-xs font-mono text-white/60">
+        <div className="flex items-center justify-between mb-3 text-xs font-mono text-white/60 gap-2 flex-wrap">
           <span className="flex items-center gap-1.5">
             <Radio className="w-3.5 h-3.5 text-[#CCFF00]" />
             <strong className="text-white">STAGE SEATS ({speakers.length}/6)</strong>
@@ -735,7 +773,6 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
           )}
         </div>
 
-        {/* 6 Stage Pods Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
           {[1, 2, 3, 4, 5, 6].map((seatNum) => {
             const occupant = speakers.find((p) => (p.seat_number || 1) === seatNum);
@@ -754,19 +791,16 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
                       : 'border-white/10 hover:border-white/20'
                   }`}
                 >
-                  {/* Seat Number Tag */}
                   <div className="absolute top-2 left-2 text-[10px] font-mono text-white/40">
                     #{seatNum}
                   </div>
 
-                  {/* Host Crown */}
                   {seatNum === 1 && (
                     <div className="absolute top-2 right-2 text-amber-400" title="Room Host">
                       <Crown className="w-3.5 h-3.5 fill-current" />
                     </div>
                   )}
 
-                  {/* Avatar with Acid Lime Pulse Speaking Ring */}
                   <div className="relative my-2">
                     <div
                       className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full bg-gradient-to-tr ${
@@ -780,7 +814,6 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
                       {occupant.avatar?.emoji || '⚡'}
                     </div>
 
-                    {/* Mic Status Icon */}
                     <div
                       className={`absolute -bottom-1 -right-1 w-5 h-5 rounded-full flex items-center justify-center text-[10px] border-2 border-[#070709] ${
                         isOccupantMuted ? 'bg-rose-500 text-white' : 'bg-[#CCFF00] text-black font-bold'
@@ -790,12 +823,10 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
                     </div>
                   </div>
 
-                  {/* Alias & Identity */}
                   <span className="font-heading font-bold text-xs text-white text-center truncate max-w-full">
                     {occupant.alias} {isMe && '(You)'}
                   </span>
 
-                  {/* Voice Mask Badge */}
                   {isMe && voiceFilter !== 'natural' ? (
                     <span className="text-[9px] font-mono text-[#00F0FF] uppercase mt-0.5">
                       {voiceFilter}
@@ -809,7 +840,6 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
               );
             }
 
-            // Empty Seat
             return (
               <div
                 key={`empty-seat-${seatNum}`}
@@ -828,7 +858,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
                     {isSeatLocked ? (
                       <Lock className="w-3.5 h-3.5 text-rose-400" />
                     ) : (
-                      <Unlock className="w-3.5 h-3.5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                      <Unlock className="w-3.5 h-3.5 opacity-60 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity" />
                     )}
                   </button>
                 )}
@@ -855,7 +885,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
         </div>
       </div>
 
-      {/* Audience Section (Listeners Floor) */}
+      {/* Audience Floor */}
       {listeners.length > 0 && (
         <div className="mb-5 p-3 rounded-2xl bg-[#111116] border border-white/10">
           <div className="flex items-center justify-between mb-2">
@@ -886,14 +916,16 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
         </div>
       )}
 
-      {/* DJ Soundboard Bar (Hello Yo signature SFX) */}
+      {/* DJ Soundboard Bar */}
       <div className="my-4 p-3 rounded-2xl bg-[#111116] border border-white/10">
-        <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center justify-between mb-2 gap-2">
           <span className="text-[11px] font-mono font-bold text-[#CCFF00] flex items-center gap-1.5">
             <Music className="w-3.5 h-3.5" />
-            <span>ROOM DJ SOUNDBOARD (LIVE SFX)</span>
+            <span>ROOM DJ SOUNDBOARD</span>
           </span>
-          <span className="text-[10px] font-mono text-white/40">Broadcasts sound to all</span>
+          <span className="text-[10px] font-mono text-white/40 hidden sm:inline">
+            Broadcasts sound to all
+          </span>
         </div>
         <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
           {DJ_SOUND_BUTTONS.map((sfx) => (
@@ -911,39 +943,38 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
 
       {/* Reaction Flying Bar */}
       <div className="flex items-center justify-between gap-2 py-3 border-t border-white/10">
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+        <div className="flex-1 min-w-0 flex items-center gap-1 sm:gap-1.5 overflow-x-auto pb-1 scrollbar-none">
           <span className="text-[11px] font-mono text-white/50 mr-1 hidden sm:inline">
-            GIFTS & REACTIONS:
+            REACTIONS:
           </span>
           {['🔥', '💖', '🚀', '👑', '⚡', '🍕', '👏', '😂'].map((emoji) => (
             <button
               key={emoji}
               onClick={() => handleSendReaction(emoji)}
-              className="text-xl p-1.5 sm:p-2 rounded-xl bg-white/5 hover:bg-white/15 hover:scale-125 active:scale-95 transition-all"
+              className="text-lg sm:text-xl p-1.5 sm:p-2 rounded-xl bg-white/5 hover:bg-white/15 hover:scale-125 active:scale-95 transition-all flex-shrink-0"
             >
               {emoji}
             </button>
           ))}
         </div>
 
-        {/* In-Room Live Chat Toggle */}
         <button
           onClick={() => {
             playUiSound('pop');
             setShowChatBox(!showChatBox);
           }}
-          className={`px-3 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 border transition-all ${
+          className={`px-3 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 border transition-all flex-shrink-0 ${
             showChatBox
               ? 'bg-[#CCFF00] text-black font-bold border-black'
               : 'bg-white/5 text-white/70 border-white/10 hover:text-white'
           }`}
         >
           <MessageSquare className="w-3.5 h-3.5" />
-          <span>Live Chat ({chatMessages.length})</span>
+          <span>Chat ({chatMessages.length})</span>
         </button>
       </div>
 
-      {/* Live In-Room Chat Drawer if open */}
+      {/* Live In-Room Chat Drawer */}
       {showChatBox && (
         <div className="my-3 p-3 rounded-2xl bg-[#070709] border border-white/15 space-y-2 animate-fadeIn">
           <div className="h-32 overflow-y-auto space-y-1.5 pr-1 text-xs">
@@ -952,7 +983,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
                 <span className="text-[#CCFF00] font-bold flex-shrink-0">
                   {msg.sender_alias}:
                 </span>
-                <span className="text-white/80">{msg.text}</span>
+                <span className="text-white/80 break-words">{msg.text}</span>
               </div>
             ))}
           </div>
@@ -960,15 +991,17 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
           <form onSubmit={handleSendChat} className="flex items-center gap-2 pt-2 border-t border-white/10">
             <input
               type="text"
+              maxLength={300}
               value={chatInput}
               onChange={(e) => setChatInput(e.target.value)}
               placeholder="Drop a live comment in the room..."
-              className="flex-1 px-3 py-1.5 rounded-xl bg-[#111116] border border-white/15 focus:border-[#CCFF00] text-white text-xs outline-none"
+              className="flex-1 min-w-0 px-3 py-1.5 rounded-xl bg-[#111116] border border-white/15 focus:border-[#CCFF00] text-white text-xs outline-none"
             />
             <button
               type="submit"
               disabled={!chatInput.trim()}
-              className="neo-btn-lime p-2 rounded-xl disabled:opacity-40"
+              aria-label="Send room comment"
+              className="neo-btn-lime p-2 rounded-xl disabled:opacity-40 flex-shrink-0"
             >
               <Send className="w-3.5 h-3.5 fill-black" />
             </button>
@@ -978,7 +1011,6 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
 
       {/* Bottom Mic & Voice Mask Control Bar */}
       <div className="pt-4 border-t border-white/10 flex flex-col md:flex-row items-center justify-between gap-4">
-        {/* Left: Voice Filter Pills */}
         <div className="flex items-center gap-1.5 flex-wrap justify-center">
           <span className="text-[11px] font-mono text-white/50 mr-1 flex items-center gap-1">
             <Sliders className="w-3 h-3" />
@@ -1007,11 +1039,16 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
           ))}
         </div>
 
-        {/* Center: Main Mic Toggle Button */}
         <div className="flex items-center gap-3">
           {myRole === 'listener' ? (
             <button
-              onClick={() => handleTakeSeat(speakers.length + 1 <= 6 ? speakers.length + 1 : 2)}
+              onClick={() => {
+                if (firstOpenSeat) {
+                  handleTakeSeat(firstOpenSeat);
+                } else {
+                  showNotice('All 6 stage seats are currently full or locked!');
+                }
+              }}
               className="neo-btn-lime px-6 py-3 rounded-2xl font-heading font-black text-sm flex items-center gap-2 shadow-neo"
             >
               <Mic className="w-5 h-5 fill-black" />
@@ -1029,7 +1066,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
               {isMuted ? (
                 <>
                   <MicOff className="w-5 h-5 text-rose-400" />
-                  <span>Unmute Mic (Spacebar)</span>
+                  <span>Unmute Mic</span>
                 </>
               ) : (
                 <>
@@ -1041,8 +1078,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
           )}
         </div>
 
-        {/* Right: Push-To-Talk Keyboard Prompt */}
-        <div className="text-right">
+        <div className="text-right hidden md:block">
           {myRole !== 'listener' ? (
             <span
               className={`text-xs font-mono px-3 py-1.5 rounded-lg border transition-all ${
@@ -1054,9 +1090,7 @@ export const VoiceRoomActive: React.FC<VoiceRoomActiveProps> = ({
               Hold <strong className="text-white font-bold">Spacebar</strong> to Talk
             </span>
           ) : (
-            <span className="text-xs font-mono text-white/40">
-              🎧 Listening Mode Active
-            </span>
+            <span className="text-xs font-mono text-white/40">🎧 Listening Mode Active</span>
           )}
         </div>
       </div>

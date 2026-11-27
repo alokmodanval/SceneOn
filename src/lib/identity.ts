@@ -4,22 +4,46 @@ import { upsertSceneUser } from './supabase';
 
 const CURRENT_USER_KEY = 'sceneon_current_user';
 
+export function secureRandomInt(max: number): number {
+  if (max <= 0) return 0;
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    const buf = new Uint32Array(1);
+    const limit = Math.floor(0xffffffff / max) * max;
+    let rand = 0;
+    do {
+      crypto.getRandomValues(buf);
+      rand = buf[0];
+    } while (rand >= limit);
+    return rand % max;
+  }
+  return Math.floor(Math.random() * max);
+}
+
 export function generateUUID(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
     return crypto.randomUUID();
   }
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export function generateSceneKey(): string {
   const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'; // exclude ambiguous 0/O, 1/I
-  const part1 = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-  const part2 = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  const part1 = Array.from({ length: 4 }, () => chars[secureRandomInt(chars.length)]).join('');
+  const part2 = Array.from({ length: 4 }, () => chars[secureRandomInt(chars.length)]).join('');
   return `SCENE-${part1}-${part2}`;
+}
+
+export function generateSecurePin(): string {
+  return String(1000 + secureRandomInt(9000));
 }
 
 const ALIAS_PREFIXES = [
@@ -33,14 +57,14 @@ const ALIAS_SUFFIXES = [
 ];
 
 export function generateRandomAlias(): string {
-  const prefix = ALIAS_PREFIXES[Math.floor(Math.random() * ALIAS_PREFIXES.length)];
-  const suffix = ALIAS_SUFFIXES[Math.floor(Math.random() * ALIAS_SUFFIXES.length)];
+  const prefix = ALIAS_PREFIXES[secureRandomInt(ALIAS_PREFIXES.length)];
+  const suffix = ALIAS_SUFFIXES[secureRandomInt(ALIAS_SUFFIXES.length)];
   return `${prefix}${suffix}`;
 }
 
 export function generateRandomAvatar(): UserAvatar {
-  const bg = AVATAR_GRADIENTS[Math.floor(Math.random() * AVATAR_GRADIENTS.length)];
-  const emoji = AVATAR_EMOJIS[Math.floor(Math.random() * AVATAR_EMOJIS.length)];
+  const bg = AVATAR_GRADIENTS[secureRandomInt(AVATAR_GRADIENTS.length)];
+  const emoji = AVATAR_EMOJIS[secureRandomInt(AVATAR_EMOJIS.length)];
   return { bg, emoji };
 }
 
@@ -48,7 +72,11 @@ export function getCurrentUser(): SceneUser | null {
   try {
     const raw = localStorage.getItem(CURRENT_USER_KEY);
     if (!raw) return null;
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw) as SceneUser;
+    if (!parsed || typeof parsed.id !== 'string' || typeof parsed.alias !== 'string') {
+      return null;
+    }
+    return parsed;
   } catch (err) {
     console.error('Error loading current user:', err);
     return null;
@@ -71,15 +99,19 @@ export function createNewSceneUser(params: {
   sliders: VibeSliders;
   scene_prompt: string;
 }): SceneUser {
+  const safeAlias = params.alias.trim().slice(0, 24) || generateRandomAlias();
+  const safePrompt =
+    params.scene_prompt.trim().slice(0, 160) || 'Aaj ka scene kya hai? Let’s connect!';
+
   const newUser: SceneUser = {
     id: generateUUID(),
     scene_key: generateSceneKey(),
-    alias: params.alias.trim() || generateRandomAlias(),
+    alias: safeAlias,
     avatar: params.avatar,
-    tags: params.tags,
+    tags: (params.tags || []).slice(0, 6),
     sliders: params.sliders,
-    scene_prompt: params.scene_prompt.trim() || 'Aaj ka scene kya hai? Let’s connect!',
-    scene_aura: 5, // Default start aura
+    scene_prompt: safePrompt,
+    scene_aura: 5,
     is_online: true,
     last_seen: new Date().toISOString(),
     created_at: new Date().toISOString(),
@@ -94,6 +126,7 @@ export function createNewSceneUser(params: {
 export function isFreshWithin24Hours(lastSeenIso: string): boolean {
   try {
     const lastSeenTime = new Date(lastSeenIso).getTime();
+    if (Number.isNaN(lastSeenTime)) return true;
     const now = Date.now();
     const twentyFourHoursMs = 24 * 60 * 60 * 1000;
     return now - lastSeenTime <= twentyFourHoursMs;
@@ -105,7 +138,7 @@ export function isFreshWithin24Hours(lastSeenIso: string): boolean {
 // Format relative time: e.g. "Just now", "5m ago", "2h ago"
 export function formatRelativeTime(isoString: string): string {
   try {
-    const diffMs = Date.now() - new Date(isoString).getTime();
+    const diffMs = Math.max(0, Date.now() - new Date(isoString).getTime());
     const diffSec = Math.floor(diffMs / 1000);
     if (diffSec < 60) return 'Just now';
     const diffMin = Math.floor(diffSec / 60);

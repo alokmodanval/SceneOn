@@ -1,31 +1,54 @@
 import Peer, { MediaConnection } from 'peerjs';
 import { supabase, isSupabaseConfigured } from './supabase';
-import { DjSoundType, RoomChatMessage, RoomParticipant } from '../types';
+import { DjSoundType, RoomChatMessage, RoomParticipant, UserAvatar } from '../types';
 
 export type SignalMessage =
-  | { type: 'join'; userId: string; alias: string; peerId: string; role?: 'host' | 'speaker' | 'listener'; seat_number?: number }
+  | {
+      type: 'join';
+      userId: string;
+      alias: string;
+      peerId: string;
+      role?: 'host' | 'speaker' | 'listener';
+      seat_number?: number;
+      avatar?: UserAvatar;
+      is_muted?: boolean;
+    }
+  | {
+      type: 'join_ack';
+      userId: string;
+      alias: string;
+      peerId: string;
+      role?: 'host' | 'speaker' | 'listener';
+      seat_number?: number;
+      avatar?: UserAvatar;
+      is_muted?: boolean;
+    }
   | { type: 'leave'; userId: string; peerId: string }
   | { type: 'reaction'; userId: string; emoji: string }
   | { type: 'dj_sound'; sound: DjSoundType; senderAlias: string }
   | { type: 'room_chat'; message: RoomChatMessage }
   | { type: 'topic'; topic: string }
   | { type: 'speaking'; userId: string; isSpeaking: boolean }
+  | { type: 'mute_state'; userId: string; isMuted: boolean }
   | { type: 'raise_hand'; userId: string; isRaised: boolean }
   | { type: 'seat_change'; userId: string; seat_number?: number; role: 'host' | 'speaker' | 'listener' }
-  | { type: 'lock_seat'; seat_number: number; isLocked: boolean };
+  | { type: 'lock_seat'; seat_number: number; isLocked: boolean }
+  | { type: 'speed_verdict'; userId: string; verdict: 'w_scene' | 'pass' };
 
 export interface WebRTCMeshCallbacks {
-  onRemoteStream: (peerId: string, stream: MediaStream) => void;
+  onRemoteStream: (peerId: string, stream: MediaStream, userId?: string) => void;
   onPeerLeave: (peerId: string, userId?: string) => void;
   onReaction: (emoji: string, senderId: string) => void;
   onDjSound?: (sound: DjSoundType, senderAlias: string) => void;
   onRoomChat?: (msg: RoomChatMessage) => void;
   onTopicChange: (topic: string) => void;
-  onPeerSpeaking: (peerId: string, isSpeaking: boolean) => void;
+  onPeerSpeaking: (userId: string, isSpeaking: boolean) => void;
   onPeerJoin?: (participant: Partial<RoomParticipant> & { peerId: string }) => void;
+  onPeerMuteChange?: (userId: string, isMuted: boolean) => void;
   onHandRaised?: (userId: string, isRaised: boolean) => void;
   onSeatChange?: (userId: string, seat_number?: number, role?: 'host' | 'speaker' | 'listener') => void;
   onLockSeat?: (seat_number: number, isLocked: boolean) => void;
+  onSpeedVerdict?: (userId: string, verdict: 'w_scene' | 'pass') => void;
 }
 
 export class WebRTCMeshRoom {
@@ -35,28 +58,49 @@ export class WebRTCMeshRoom {
   private localStream: MediaStream | null = null;
   private callbacks: WebRTCMeshCallbacks;
 
+  // Peer metadata preserved for join_ack responses
+  private myRole: 'host' | 'speaker' | 'listener' = 'speaker';
+  private mySeat: number | undefined = 1;
+  private myAvatar?: UserAvatar;
+  private myMuted: boolean = true;
+
   // PeerJS signaling
   private peer: Peer | null = null;
   public myPeerId: string = '';
-  private activeCalls: Map<string, MediaConnection> = new Map(); // targetPeerId -> call
+  private activeCalls: Map<string, MediaConnection> = new Map();
   private remoteAudioElements: Map<string, HTMLAudioElement> = new Map();
 
   // Multi-tier Fallback Channels
   private realtimeChannel: any = null;
   private localBroadcastChannel: BroadcastChannel | null = null;
-  private knownPeers: Map<string, { userId: string; alias: string }> = new Map(); // peerId -> info
+  private knownPeers: Map<string, { userId: string; alias: string }> = new Map();
+  private isDestroyed = false;
 
-  constructor(roomId: string, userId: string, alias: string, callbacks: WebRTCMeshCallbacks) {
+  constructor(
+    roomId: string,
+    userId: string,
+    alias: string,
+    callbacks: WebRTCMeshCallbacks,
+    avatar?: UserAvatar,
+    initialMuted = true
+  ) {
     this.roomId = roomId;
     this.userId = userId;
     this.alias = alias;
     this.callbacks = callbacks;
+    this.myAvatar = avatar;
+    this.myMuted = initialMuted;
   }
 
-  public async start(stream: MediaStream, initialRole: 'host' | 'speaker' | 'listener' = 'speaker', initialSeat: number = 1): Promise<string> {
+  public async start(
+    stream: MediaStream,
+    initialRole: 'host' | 'speaker' | 'listener' = 'speaker',
+    initialSeat: number | undefined = 1
+  ): Promise<string> {
     this.localStream = stream;
+    this.myRole = initialRole;
+    this.mySeat = initialSeat;
 
-    // Deterministic or clean Peer ID: fc_<cleanUserId>_<random4>
     const cleanId = this.userId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 10);
     const candidateId = `fc_${cleanId}_${Math.random().toString(36).substring(2, 6)}`;
 
@@ -74,44 +118,71 @@ export class WebRTCMeshRoom {
         });
 
         this.peer.on('open', (id) => {
+          if (this.isDestroyed) {
+            this.peer?.destroy();
+            resolve(id);
+            return;
+          }
           this.myPeerId = id;
-          this.initSignaling(initialRole, initialSeat);
+          this.initSignaling();
           resolve(id);
         });
 
-        this.peer.on('error', (err: any) => {
+        this.peer.on('error', (err: unknown) => {
           console.warn('[PeerJS] Fallback/Error:', err);
-          // If ID taken or failed, initialize with auto-generated ID
-          if (!this.myPeerId) {
-            this.peer = new Peer({
-              config: {
-                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-              },
-            });
-            this.peer.on('open', (newId) => {
-              this.myPeerId = newId;
-              this.initSignaling(initialRole, initialSeat);
-              resolve(newId);
-            });
+          if (!this.myPeerId && !this.isDestroyed) {
+            try {
+              this.peer = new Peer({
+                config: {
+                  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+                },
+              });
+              this.peer.on('open', (newId) => {
+                if (this.isDestroyed) {
+                  this.peer?.destroy();
+                  resolve(newId);
+                  return;
+                }
+                this.myPeerId = newId;
+                this.initSignaling();
+                resolve(newId);
+              });
+            } catch {
+              this.myPeerId = candidateId;
+              this.initSignaling();
+              resolve(candidateId);
+            }
           }
         });
 
-        // Handle incoming audio call
         this.peer.on('call', (call) => {
-          if (!this.localStream) return;
+          if (!this.localStream || this.isDestroyed) return;
           call.answer(this.localStream);
           this.setupCall(call);
         });
       } catch (err) {
         console.error('PeerJS init failed:', err);
-        this.initSignaling(initialRole, initialSeat);
+        this.myPeerId = candidateId;
+        this.initSignaling();
         resolve(candidateId);
       }
     });
   }
 
-  private initSignaling(role: 'host' | 'speaker' | 'listener', seat_number: number) {
-    // 1. Supabase Realtime Broadcast Channel
+  private initSignaling() {
+    if (this.isDestroyed) return;
+
+    const joinPayload: SignalMessage = {
+      type: 'join',
+      userId: this.userId,
+      alias: this.alias,
+      peerId: this.myPeerId,
+      role: this.myRole,
+      seat_number: this.mySeat,
+      avatar: this.myAvatar,
+      is_muted: this.myMuted,
+    };
+
     if (isSupabaseConfigured && supabase) {
       this.realtimeChannel = supabase.channel(`voice_room_${this.roomId}`, {
         config: { broadcast: { self: false } },
@@ -122,20 +193,12 @@ export class WebRTCMeshRoom {
           this.handleSignal(payload.payload);
         })
         .subscribe((status: string) => {
-          if (status === 'SUBSCRIBED') {
-            this.broadcastSignal({
-              type: 'join',
-              userId: this.userId,
-              alias: this.alias,
-              peerId: this.myPeerId,
-              role,
-              seat_number,
-            });
+          if (status === 'SUBSCRIBED' && !this.isDestroyed) {
+            this.broadcastSignal(joinPayload);
           }
         });
     }
 
-    // 2. Local/Tab-to-Tab BroadcastChannel
     try {
       this.localBroadcastChannel = new BroadcastChannel(`sceneon_mesh_${this.roomId}`);
       this.localBroadcastChannel.onmessage = (event) => {
@@ -143,17 +206,9 @@ export class WebRTCMeshRoom {
           this.handleSignal(event.data);
         }
       };
-      // Send initial announcement
-      this.broadcastSignal({
-        type: 'join',
-        userId: this.userId,
-        alias: this.alias,
-        peerId: this.myPeerId,
-        role,
-        seat_number,
-      });
-    } catch (err) {
-      console.warn('BroadcastChannel not supported:', err);
+      this.localBroadcastChannel.postMessage(joinPayload);
+    } catch {
+      // BroadcastChannel unavailable
     }
   }
 
@@ -161,17 +216,18 @@ export class WebRTCMeshRoom {
     this.activeCalls.set(call.peer, call);
 
     call.on('stream', (remoteStream) => {
-      // Create/reuse audio element
       let audioEl = this.remoteAudioElements.get(call.peer);
       if (!audioEl) {
         audioEl = new Audio();
         audioEl.autoplay = true;
+        (audioEl as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
         this.remoteAudioElements.set(call.peer, audioEl);
       }
       audioEl.srcObject = remoteStream;
       audioEl.play().catch(() => {});
 
-      this.callbacks.onRemoteStream(call.peer, remoteStream);
+      const mappedUserId = this.knownPeers.get(call.peer)?.userId;
+      this.callbacks.onRemoteStream(call.peer, remoteStream, mappedUserId);
     });
 
     call.on('close', () => {
@@ -185,12 +241,20 @@ export class WebRTCMeshRoom {
   }
 
   private callPeer(targetPeerId: string) {
-    if (!this.peer || !this.localStream || this.activeCalls.has(targetPeerId) || targetPeerId === this.myPeerId) {
+    if (
+      this.isDestroyed ||
+      !this.peer ||
+      !this.localStream ||
+      this.activeCalls.has(targetPeerId) ||
+      targetPeerId === this.myPeerId
+    ) {
       return;
     }
     try {
       const call = this.peer.call(targetPeerId, this.localStream);
-      this.setupCall(call);
+      if (call) {
+        this.setupCall(call);
+      }
     } catch (err) {
       console.warn('Failed to call peer:', targetPeerId, err);
     }
@@ -198,16 +262,15 @@ export class WebRTCMeshRoom {
 
   public updateLocalStream(newStream: MediaStream) {
     this.localStream = newStream;
-    // Replace tracks on active calls
     const audioTrack = newStream.getAudioTracks()[0];
     if (!audioTrack) return;
 
     this.activeCalls.forEach((call) => {
       try {
-        const senders = (call as any).peerConnection?.getSenders();
-        const audioSender = senders?.find((s: any) => s.track?.kind === 'audio');
+        const senders = (call as unknown as { peerConnection?: RTCPeerConnection }).peerConnection?.getSenders();
+        const audioSender = senders?.find((s) => s.track?.kind === 'audio');
         if (audioSender) {
-          audioSender.replaceTrack(audioTrack);
+          audioSender.replaceTrack(audioTrack).catch(() => {});
         }
       } catch (err) {
         console.warn('Track replacement error:', err);
@@ -216,6 +279,7 @@ export class WebRTCMeshRoom {
   }
 
   private broadcastSignal(msg: SignalMessage) {
+    if (this.isDestroyed) return;
     if (this.realtimeChannel) {
       this.realtimeChannel.send({
         type: 'broadcast',
@@ -224,11 +288,17 @@ export class WebRTCMeshRoom {
       });
     }
     if (this.localBroadcastChannel) {
-      this.localBroadcastChannel.postMessage(msg);
+      try {
+        this.localBroadcastChannel.postMessage(msg);
+      } catch {
+        // Ignore closed channel
+      }
     }
   }
 
   private handleSignal(msg: SignalMessage) {
+    if (this.isDestroyed) return;
+
     switch (msg.type) {
       case 'join': {
         this.knownPeers.set(msg.peerId, { userId: msg.userId, alias: msg.alias });
@@ -238,14 +308,44 @@ export class WebRTCMeshRoom {
           peerId: msg.peerId,
           role: msg.role || 'speaker',
           seat_number: msg.seat_number,
+          avatar: msg.avatar,
+          is_muted: msg.is_muted ?? true,
         });
 
-        // If I have a smaller peerId or I'm earlier, connect to them
-        if (this.myPeerId && msg.peerId && this.myPeerId !== msg.peerId) {
-          // Avoid duplicate calls: only call if our peer ID is lexicographically greater
-          if (this.myPeerId > msg.peerId) {
-            setTimeout(() => this.callPeer(msg.peerId), 500);
-          }
+        // Acknowledge presence so late joiners see existing peers & initiate WebRTC bidirectionally
+        this.broadcastSignal({
+          type: 'join_ack',
+          userId: this.userId,
+          alias: this.alias,
+          peerId: this.myPeerId,
+          role: this.myRole,
+          seat_number: this.mySeat,
+          avatar: this.myAvatar,
+          is_muted: this.myMuted,
+        });
+
+        if (this.myPeerId && msg.peerId && this.myPeerId > msg.peerId) {
+          setTimeout(() => this.callPeer(msg.peerId), 400);
+        }
+        break;
+      }
+      case 'join_ack': {
+        const alreadyKnown = this.knownPeers.has(msg.peerId);
+        this.knownPeers.set(msg.peerId, { userId: msg.userId, alias: msg.alias });
+        if (!alreadyKnown) {
+          this.callbacks.onPeerJoin?.({
+            id: msg.userId,
+            alias: msg.alias,
+            peerId: msg.peerId,
+            role: msg.role || 'speaker',
+            seat_number: msg.seat_number,
+            avatar: msg.avatar,
+            is_muted: msg.is_muted ?? true,
+          });
+        }
+
+        if (this.myPeerId && msg.peerId && this.myPeerId > msg.peerId) {
+          setTimeout(() => this.callPeer(msg.peerId), 400);
         }
         break;
       }
@@ -275,6 +375,10 @@ export class WebRTCMeshRoom {
         this.callbacks.onPeerSpeaking(msg.userId, msg.isSpeaking);
         break;
       }
+      case 'mute_state': {
+        this.callbacks.onPeerMuteChange?.(msg.userId, msg.isMuted);
+        break;
+      }
       case 'raise_hand': {
         this.callbacks.onHandRaised?.(msg.userId, msg.isRaised);
         break;
@@ -285,6 +389,10 @@ export class WebRTCMeshRoom {
       }
       case 'lock_seat': {
         this.callbacks.onLockSeat?.(msg.seat_number, msg.isLocked);
+        break;
+      }
+      case 'speed_verdict': {
+        this.callbacks.onSpeedVerdict?.(msg.userId, msg.verdict);
         break;
       }
     }
@@ -311,7 +419,7 @@ export class WebRTCMeshRoom {
       id: `rc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       sender_id: this.userId,
       sender_alias: this.alias,
-      text: text.trim(),
+      text: text.trim().slice(0, 300),
       created_at: new Date().toISOString(),
     };
     this.broadcastSignal({
@@ -336,6 +444,15 @@ export class WebRTCMeshRoom {
     });
   }
 
+  public broadcastMuteState(isMuted: boolean) {
+    this.myMuted = isMuted;
+    this.broadcastSignal({
+      type: 'mute_state',
+      userId: this.userId,
+      isMuted,
+    });
+  }
+
   public broadcastRaiseHand(isRaised: boolean) {
     this.broadcastSignal({
       type: 'raise_hand',
@@ -345,6 +462,8 @@ export class WebRTCMeshRoom {
   }
 
   public broadcastSeatChange(seat_number?: number, role: 'host' | 'speaker' | 'listener' = 'speaker') {
+    this.mySeat = seat_number;
+    this.myRole = role;
     this.broadcastSignal({
       type: 'seat_change',
       userId: this.userId,
@@ -358,6 +477,14 @@ export class WebRTCMeshRoom {
       type: 'lock_seat',
       seat_number,
       isLocked,
+    });
+  }
+
+  public broadcastSpeedVerdict(verdict: 'w_scene' | 'pass') {
+    this.broadcastSignal({
+      type: 'speed_verdict',
+      userId: this.userId,
+      verdict,
     });
   }
 
@@ -376,14 +503,17 @@ export class WebRTCMeshRoom {
   }
 
   public leave() {
+    if (this.isDestroyed) return;
     this.broadcastSignal({
       type: 'leave',
       userId: this.userId,
       peerId: this.myPeerId,
     });
+    this.isDestroyed = true;
 
     this.activeCalls.forEach((call) => call.close());
     this.activeCalls.clear();
+    this.knownPeers.clear();
 
     this.remoteAudioElements.forEach((audio) => {
       audio.srcObject = null;
@@ -394,7 +524,9 @@ export class WebRTCMeshRoom {
     if (this.peer) {
       try {
         this.peer.destroy();
-      } catch {}
+      } catch {
+        // Ignore peer cleanup error
+      }
       this.peer = null;
     }
 

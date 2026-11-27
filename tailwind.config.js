@@ -41,6 +41,8 @@ export default {
       animation: {
         'pulse-speaking': 'speakingPulse 1.2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
         'float-slow': 'floating 4s ease-in-out infinite',
+        'fadeIn': 'fadeIn 0.22s ease-out forwards',
+        'float-reaction': 'floatReaction 2s cubic-bezier(0.22, 1, 0.36, 1) forwards',
       },
       keyframes: {
         speakingPulse: {
@@ -50,7 +52,16 @@ export default {
         floating: {
           '0%, 100%': { transform: 'translateY(0px)' },
           '50%': { transform: 'translateY(-6px)' },
-        }
+        },
+        fadeIn: {
+          '0%': { opacity: '0', transform: 'translateY(6px) scale(0.99)' },
+          '100%': { opacity: '1', transform: 'translateY(0) scale(1)' },
+        },
+        floatReaction: {
+          '0%': { opacity: '0', transform: 'translateY(0) scale(0.7)' },
+          '15%': { opacity: '1', transform: 'translateY(-35px) scale(1.15)' },
+          '100%': { opacity: '0', transform: 'translateY(-260px) scale(0.95) rotate(8deg)' },
+        },
       }
     },
   },

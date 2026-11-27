@@ -97,18 +97,18 @@ export const LiveVoiceRooms: React.FC<LiveVoiceRoomsProps> = ({
           className="neo-btn-lime px-5 py-3 rounded-2xl text-xs sm:text-sm font-bold flex items-center gap-2 flex-shrink-0 shadow-neo"
         >
           <Plus className="w-4 h-4 stroke-[3]" />
-          <span>+ Host a Scene (Global / Private)</span>
+          <span>Host a Scene (Global / Private)</span>
         </button>
       </div>
 
       {/* Filter Tabs (All, Public, Private VIP) */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1">
+      <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
         <button
           onClick={() => {
             playUiSound('pop');
             setFilterType('all');
           }}
-          className={`px-3.5 py-1.5 rounded-xl text-xs font-mono font-bold transition-all border ${
+          className={`px-3.5 py-1.5 rounded-xl text-xs font-mono font-bold transition-all border whitespace-nowrap flex-shrink-0 ${
             filterType === 'all'
               ? 'bg-[#CCFF00] text-black border-black shadow-neo-sm'
               : 'bg-[#111116] text-white/70 border-white/10 hover:border-white/30'
@@ -122,14 +122,14 @@ export const LiveVoiceRooms: React.FC<LiveVoiceRoomsProps> = ({
             playUiSound('pop');
             setFilterType('public');
           }}
-          className={`px-3.5 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 transition-all border ${
+          className={`px-3.5 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 transition-all border whitespace-nowrap flex-shrink-0 ${
             filterType === 'public'
               ? 'bg-[#CCFF00] text-black font-bold border-black shadow-neo-sm'
               : 'bg-[#111116] text-white/70 border-white/10 hover:border-white/30'
           }`}
         >
           <Globe className="w-3.5 h-3.5" />
-          <span>🌐 Global Public</span>
+          <span>Global Public</span>
         </button>
 
         <button
@@ -137,14 +137,14 @@ export const LiveVoiceRooms: React.FC<LiveVoiceRoomsProps> = ({
             playUiSound('pop');
             setFilterType('private');
           }}
-          className={`px-3.5 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 transition-all border ${
+          className={`px-3.5 py-1.5 rounded-xl text-xs font-mono flex items-center gap-1.5 transition-all border whitespace-nowrap flex-shrink-0 ${
             filterType === 'private'
               ? 'bg-violet-500 text-white font-bold border-violet-400 shadow-neo-violet'
               : 'bg-[#111116] text-white/70 border-white/10 hover:border-white/30'
           }`}
         >
-          <Lock className="w-3.5 h-3.5 text-violet-400" />
-          <span>🔒 Private VIP</span>
+          <Lock className="w-3.5 h-3.5 text-violet-300" />
+          <span>Private VIP</span>
         </button>
       </div>
 
@@ -298,6 +298,7 @@ export const LiveVoiceRooms: React.FC<LiveVoiceRoomsProps> = ({
           <div className="relative w-full max-w-sm bg-[#111116] border-2 border-violet-400 rounded-3xl p-6 shadow-neo-violet space-y-4">
             <button
               onClick={() => setPinPromptRoom(null)}
+              aria-label="Close PIN modal"
               className="absolute top-4 right-4 p-1.5 rounded-lg bg-white/5 text-white/60 hover:text-white"
             >
               <X className="w-4 h-4" />

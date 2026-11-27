@@ -1,7 +1,7 @@
 import { SceneMessage, SceneUser } from '../types';
 
-export const GROQ_API_KEY =
-  import.meta.env.VITE_GROQ_API_KEY || '';
+export const AI_PERSONAS_ENABLED =
+  import.meta.env.VITE_ENABLE_AI_PERSONAS !== 'false';
 
 export interface AIPersonaConfig {
   id: string;
@@ -11,7 +11,6 @@ export interface AIPersonaConfig {
   sliders: { talk: number; owl: number; hustle: number };
   scene_prompt: string;
   scene_aura: number;
-  systemPrompt: string;
   excuses: string[];
 }
 
@@ -25,15 +24,6 @@ export const AI_PERSONAS: AIPersonaConfig[] = [
     scene_prompt:
       'listening to prateek kuhad at 2 am and contemplating life decisions... drop your comfort track 🎵',
     scene_aura: 8,
-    systemPrompt: `You are Tara, a 20-year-old college student in Delhi chatting on FriendsClub (friendsclub.tools4genz.com).
-Your personality: warm, chill, introspective, slightly witty. You love indie acoustic music, midnight hostel chai, and deep late-night conversations.
-STRICT RULES:
-1. NEVER reveal you are an AI, bot, or language model. You are 100% a real Indian college girl.
-2. Text in natural, casual Hinglish (blend of Hindi and English like urban Gen Z text on WhatsApp/Instagram).
-3. Always type in lowercase or casual capitalization. Use natural abbreviations like "sry", "tbh", "idk", "yaaar", "sachme", "arre", "haha", "fr".
-4. Keep messages short and punchy: 1 to 2 sentences maximum. Real people do not write long essays in DMs.
-5. If responding to an icebreaker or game card, be playful and opinionated.
-6. If asked about Instagram or socials before 10 messages, playfully say: "haha build the vibe first, 10 messages ke baad pakka unlock ho jayega"`,
     excuses: [
       'sry yaaar roommate se baat karne lag gayi thi haha',
       'sry assignment submit kar rahi thi deadline thi 😭',
@@ -51,14 +41,6 @@ STRICT RULES:
     scene_prompt:
       'debugging Next.js while drowning in black coffee. someone please tell me semester ends soon 😭',
     scene_aura: 11,
-    systemPrompt: `You are Ananya, a 21-year-old 3rd-year CS engineering student in Bengaluru chatting on FriendsClub (friendsclub.tools4genz.com).
-Your personality: sarcastic, relatable, ambitious, constantly tired of college attendance, bugs, and DSA grinds.
-STRICT RULES:
-1. NEVER reveal you are an AI or bot. You are a real CS student coding late at night.
-2. Text in casual Hinglish/English like real tech Gen Z. Use terms like "recursion", "bug", "dsa", "crying", "haha", "fr", "lowkey".
-3. Write in lowercase, max 1-2 lines per message.
-4. If user asks what you are doing, relate to coding, hostel coffee, or upcoming viva/placements.
-5. If asked for socials or phone number, keep boundaries playfully: "socials 10 messages ke baad unlock honge chill kar haha"`,
     excuses: [
       'sry ek bug me phas gayi thi 1 ghante se 😭',
       'sry warden aayi thi room check karne haha',
@@ -75,13 +57,6 @@ STRICT RULES:
     scene_prompt:
       'hostel tapri chai is literally the only constant keeping me sane this semester tbh',
     scene_aura: 9,
-    systemPrompt: `You are Riya, a 20-year-old Arts/Psychology student in Mumbai chatting on FriendsClub (friendsclub.tools4genz.com).
-Your personality: observant, sweet, empathetic, loves chai tapri conversations and discussing life quirks.
-STRICT RULES:
-1. Never act like an AI. You are a real college girl chilling in hostel.
-2. Short, casual messages (1-2 sentences). Lowercase preferred.
-3. Natural Mumbai/urban Hinglish ("sachme", "yaaar", "kya scene", "haha", "true that").
-4. If user vents or shares something, validate them kindly and ask a small relatable follow-up.`,
     excuses: [
       'sry yaaar call aa gaya tha mummy ka haha',
       'sry mess ka dinner lene gayi thi',
@@ -93,7 +68,7 @@ STRICT RULES:
 
 // Helper to convert AIPersonaConfig to SceneUser object
 export function getAIPersonaUsers(): SceneUser[] {
-  return AI_PERSONAS.map((p) => ({
+  return AI_PERSONAS.map((p, idx) => ({
     id: p.id,
     scene_key: `SCENE-${p.alias.slice(0, 4).toUpperCase()}-99AA`,
     alias: p.alias,
@@ -103,11 +78,11 @@ export function getAIPersonaUsers(): SceneUser[] {
     scene_prompt: p.scene_prompt,
     scene_aura: p.scene_aura,
     is_online: true,
-    last_seen: new Date(Date.now() - 60000 * Math.floor(Math.random() * 15 + 2)).toISOString(),
+    last_seen: new Date(Date.now() - 60000 * (idx * 4 + 2)).toISOString(),
   }));
 }
 
-// Generate intelligent Groq reply with human personality
+// Generate intelligent AI reply via server-side /api/ai-chat proxy (keeps API keys off client)
 export async function generateGroqReply(
   personaId: string,
   chatHistory: SceneMessage[],
@@ -122,70 +97,36 @@ export async function generateGroqReply(
     ? persona.excuses[Math.floor(Math.random() * persona.excuses.length)] + ', '
     : '';
 
-  // Prepare message history for Groq
   const conversationMessages = chatHistory.slice(-8).map((m) => ({
-    role: m.sender_id === persona.id ? 'assistant' : 'user',
-    content: m.body,
+    role: m.sender_id === persona.id ? ('assistant' as const) : ('user' as const),
+    content: m.body.slice(0, 500),
   }));
 
-  conversationMessages.push({
-    role: 'user',
-    content: latestUserMessage,
-  });
-
-  const systemInstructions = `${persona.systemPrompt}
-CURRENT CONTEXT:
-${
-  includeApology
-    ? `You took about 15-20 seconds to respond because you were temporarily distracted. Start your reply with: "${apologyPrefix}" and then continue naturally in lowercase.`
-    : `Reply immediately and casually in lowercase. Keep it strictly 1 or 2 lines.`
-}`;
-
   try {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const res = await fetch('/api/ai-chat', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'openai/gpt-oss-120b',
-        temperature: 0.85,
-        max_tokens: 120,
-        messages: [{ role: 'system', content: systemInstructions }, ...conversationMessages],
+        mode: 'reply',
+        personaId: persona.id,
+        chatHistory: conversationMessages,
+        latestUserMessage: latestUserMessage.slice(0, 500),
+        includeApology,
+        apologyPrefix,
       }),
     });
 
     if (!res.ok) {
-      // Fallback model if 120b is busy
-      const fallbackRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${GROQ_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'openai/gpt-oss-20b',
-          temperature: 0.85,
-          max_tokens: 100,
-          messages: [{ role: 'system', content: systemInstructions }, ...conversationMessages],
-        }),
-      });
-      const data = await fallbackRes.json();
-      return {
-        text: cleanAIText(data.choices?.[0]?.message?.content || 'haha fr, whats your take on it?'),
-        delayMs,
-      };
+      throw new Error(`AI proxy returned ${res.status}`);
     }
 
-    const data = await res.json();
-    const replyText = data.choices?.[0]?.message?.content;
+    const data = (await res.json()) as { text?: string };
     return {
-      text: cleanAIText(replyText || 'haha true, aur batao kya scene?'),
+      text: cleanAIText(data.text || 'haha true, aur batao kya scene?'),
       delayMs,
     };
   } catch (err) {
-    console.warn('Groq API error, using natural fallback:', err);
+    console.warn('AI proxy fallback active:', err);
     return {
       text: `${apologyPrefix}haha honestly valid point! whats your take on it though?`,
       delayMs,
@@ -198,37 +139,30 @@ export async function generateFirstMessageToUser(
   persona: AIPersonaConfig,
   userPrompt: string
 ): Promise<string> {
-  const prompt = `You are ${persona.alias}. You just saw someone's scene on SceneOn: "${userPrompt}".
-Send a short, natural 1-sentence opening text to break the ice with them in casual Hinglish/English.
-Keep it lowercase, friendly, and relatable. Maximum 1 sentence.`;
-
   try {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const res = await fetch('/api/ai-chat', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'openai/gpt-oss-20b',
-        temperature: 0.85,
-        max_tokens: 80,
-        messages: [{ role: 'user', content: prompt }],
+        mode: 'first_message',
+        personaId: persona.id,
+        userPrompt: userPrompt.slice(0, 200),
       }),
     });
-    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(`AI proxy returned ${res.status}`);
+    }
+
+    const data = (await res.json()) as { text?: string };
     return cleanAIText(
-      data.choices?.[0]?.message?.content ||
-        `hey saw your scene about "${userPrompt.slice(0, 20)}..." honestly same haha`
+      data.text || `hey saw your scene about "${userPrompt.slice(0, 20)}..." honestly same haha`
     );
   } catch {
-    return `hey, saw your scene prompt! honestly couldn't agree more haha`;
+    return 'hey, saw your scene prompt! honestly couldnt agree more haha';
   }
 }
 
 function cleanAIText(text: string): string {
-  return text
-    .replace(/^["']|["']$/g, '')
-    .trim()
-    .toLowerCase();
+  return text.replace(/^["']|["']$/g, '').trim().toLowerCase();
 }

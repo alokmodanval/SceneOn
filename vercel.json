@@ -3,7 +3,7 @@
   "framework": "vite",
   "rewrites": [
     {
-      "source": "/(.*)",
+      "source": "/((?!api/|assets/|sitemap\\.xml|robots\\.txt|manifest\\.json|favicon\\.svg|icons\\.svg|og-image\\.png).*)",
       "destination": "/index.html"
     }
   ],
@@ -20,8 +20,12 @@
           "value": "DENY"
         },
         {
-          "key": "X-XSS-Protection",
-          "value": "1; mode=block"
+          "key": "Referrer-Policy",
+          "value": "strict-origin-when-cross-origin"
+        },
+        {
+          "key": "Permissions-Policy",
+          "value": "microphone=(self), camera=(), geolocation=()"
         }
       ]
     }

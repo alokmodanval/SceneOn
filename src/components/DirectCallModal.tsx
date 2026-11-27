@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Mic, MicOff, PhoneOff } from 'lucide-react';
 import { SceneUser } from '../types';
-import { createVolumeMeter, playUiSound } from '../lib/audioEngine';
+import { createSilentAudioStream, createVolumeMeter, playUiSound } from '../lib/audioEngine';
 import { WebRTCMeshRoom } from '../lib/webrtcMesh';
 
 interface DirectCallModalProps {
@@ -23,10 +23,18 @@ export const DirectCallModal: React.FC<DirectCallModalProps> = ({
   const [isLocalSpeaking, setIsLocalSpeaking] = useState(false);
   const [isRemoteSpeaking, setIsRemoteSpeaking] = useState(false);
   const [callDuration, setCallDuration] = useState(0);
+  const [callNotice, setCallNotice] = useState<string | null>(null);
+
+  const isMutedRef = useRef(isMuted);
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+  }, [isMuted]);
 
   const rawStreamRef = useRef<MediaStream | null>(null);
   const meshRef = useRef<WebRTCMeshRoom | null>(null);
   const meterCleanupRef = useRef<(() => void) | null>(null);
+  const remoteMeterCleanupRef = useRef<(() => void) | null>(null);
+  const closeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -34,48 +42,70 @@ export const DirectCallModal: React.FC<DirectCallModalProps> = ({
     let isCancelled = false;
 
     async function startCall() {
+      setCallDuration(0);
+      setIsMuted(false);
+      isMutedRef.current = false;
+      setIsLocalSpeaking(false);
+      setIsRemoteSpeaking(false);
+      setCallNotice(null);
+
+      let stream: MediaStream;
+      let micReady = true;
+
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         if (isCancelled) {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
         rawStreamRef.current = stream;
 
-        // Meter for speaking visualization
-        const cleanupMeter = createVolumeMeter(stream, (_level, isSpeaking) => {
-          setIsLocalSpeaking(isSpeaking && !isMuted);
-          if (meshRef.current) {
-            meshRef.current.broadcastSpeaking(isSpeaking && !isMuted);
-          }
+        meterCleanupRef.current = createVolumeMeter(stream, (_level, isSpeaking) => {
+          const active = isSpeaking && !isMutedRef.current;
+          setIsLocalSpeaking(active);
+          meshRef.current?.broadcastSpeaking(active);
         });
-        meterCleanupRef.current = cleanupMeter;
+      } catch (err) {
+        console.warn('Call microphone fallback to silent stream:', err);
+        micReady = false;
+        setIsMuted(true);
+        isMutedRef.current = true;
+        setCallNotice('Mic unavailable — connected in listen-only mode.');
+        stream = createSilentAudioStream();
+      }
 
-        let remoteMeterCleanup: (() => void) | null = null;
-        const callRoomId = `call_${chatId}`;
-        const mesh = new WebRTCMeshRoom(callRoomId, currentUser.id, currentUser.alias, {
+      if (isCancelled) return;
+
+      const callRoomId = `call_${chatId}`;
+      const mesh = new WebRTCMeshRoom(
+        callRoomId,
+        currentUser.id,
+        currentUser.alias,
+        {
           onRemoteStream: (_peerId, remoteStream) => {
-            if (remoteMeterCleanup) remoteMeterCleanup();
-            remoteMeterCleanup = createVolumeMeter(remoteStream, (_level, isSpeaking) => {
+            if (remoteMeterCleanupRef.current) {
+              remoteMeterCleanupRef.current();
+            }
+            remoteMeterCleanupRef.current = createVolumeMeter(remoteStream, (_level, isSpeaking) => {
               setIsRemoteSpeaking(isSpeaking);
             });
           },
           onPeerLeave: () => {
-            alert(`${targetUser.alias} left the call.`);
-            onClose();
+            setCallNotice(`${targetUser.alias} left the call.`);
+            closeTimeoutRef.current = setTimeout(() => onClose(), 1200);
           },
           onReaction: () => {},
           onTopicChange: () => {},
           onPeerSpeaking: (_peerId, speaking) => {
             setIsRemoteSpeaking(speaking);
           },
-        });
+        },
+        currentUser.avatar,
+        !micReady
+      );
 
-        meshRef.current = mesh;
-        await mesh.start(stream);
-      } catch (err) {
-        console.warn('Call microphone error:', err);
-      }
+      meshRef.current = mesh;
+      await mesh.start(stream, 'speaker', 1);
     }
 
     startCall();
@@ -87,29 +117,45 @@ export const DirectCallModal: React.FC<DirectCallModalProps> = ({
     return () => {
       isCancelled = true;
       clearInterval(timer);
+      if (closeTimeoutRef.current) {
+        clearTimeout(closeTimeoutRef.current);
+      }
       if (rawStreamRef.current) {
         rawStreamRef.current.getTracks().forEach((t) => t.stop());
+        rawStreamRef.current = null;
       }
       if (meterCleanupRef.current) {
         meterCleanupRef.current();
+        meterCleanupRef.current = null;
+      }
+      if (remoteMeterCleanupRef.current) {
+        remoteMeterCleanupRef.current();
+        remoteMeterCleanupRef.current = null;
       }
       if (meshRef.current) {
         meshRef.current.leave();
+        meshRef.current = null;
       }
     };
-  }, [isOpen, chatId, currentUser.id, currentUser.alias, targetUser.alias, onClose]);
+  }, [isOpen, chatId, currentUser.id, currentUser.alias, currentUser.avatar, targetUser.alias, onClose]);
 
   if (!isOpen) return null;
 
   const toggleMic = () => {
+    if (!rawStreamRef.current) {
+      setCallNotice('Microphone permission is required to unmute.');
+      return;
+    }
     playUiSound('pop');
     const nextState = !isMuted;
     setIsMuted(nextState);
-    if (rawStreamRef.current) {
-      rawStreamRef.current.getAudioTracks().forEach((t) => {
-        t.enabled = !nextState;
-      });
-    }
+    isMutedRef.current = nextState;
+    if (nextState) setIsLocalSpeaking(false);
+
+    rawStreamRef.current.getAudioTracks().forEach((t) => {
+      t.enabled = !nextState;
+    });
+    meshRef.current?.broadcastMuteState(nextState);
   };
 
   const handleEndCall = () => {
@@ -126,7 +172,6 @@ export const DirectCallModal: React.FC<DirectCallModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-md animate-fadeIn">
       <div className="relative w-full max-w-md bg-[#111116] border-2 border-[#CCFF00] rounded-3xl p-6 sm:p-8 shadow-neo text-center space-y-6">
-        {/* Call Status Header */}
         <div className="flex items-center justify-center gap-2">
           <span className="flex h-2.5 w-2.5 relative">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#CCFF00] opacity-75"></span>
@@ -137,9 +182,13 @@ export const DirectCallModal: React.FC<DirectCallModalProps> = ({
           </span>
         </div>
 
-        {/* User Avatars Row */}
+        {callNotice && (
+          <div className="p-2.5 rounded-xl bg-amber-500/15 border border-amber-400/40 text-amber-200 text-xs font-mono">
+            {callNotice}
+          </div>
+        )}
+
         <div className="flex items-center justify-center gap-6 py-4">
-          {/* Current User */}
           <div className="flex flex-col items-center">
             <div
               className={`w-20 h-20 rounded-full bg-gradient-to-tr ${currentUser.avatar.bg} flex items-center justify-center text-3xl border-2 transition-all ${
@@ -157,7 +206,6 @@ export const DirectCallModal: React.FC<DirectCallModalProps> = ({
 
           <div className="text-xl font-bold text-[#CCFF00]">⚡</div>
 
-          {/* Target User */}
           <div className="flex flex-col items-center">
             <div
               className={`w-20 h-20 rounded-full bg-gradient-to-tr ${targetUser.avatar.bg} flex items-center justify-center text-3xl border-2 transition-all ${
@@ -174,15 +222,14 @@ export const DirectCallModal: React.FC<DirectCallModalProps> = ({
           </div>
         </div>
 
-        {/* Timer */}
         <div className="font-mono text-2xl font-bold text-white/90">
           {formatTime(callDuration)}
         </div>
 
-        {/* Call Controls */}
         <div className="flex items-center justify-center gap-4 pt-4 border-t border-white/10">
           <button
             onClick={toggleMic}
+            aria-label={isMuted ? 'Unmute microphone' : 'Mute microphone'}
             className={`p-4 rounded-2xl border-2 transition-all ${
               isMuted
                 ? 'bg-rose-500/20 border-rose-500 text-rose-400'
@@ -194,6 +241,7 @@ export const DirectCallModal: React.FC<DirectCallModalProps> = ({
 
           <button
             onClick={handleEndCall}
+            aria-label="End voice call"
             className="p-4 rounded-2xl bg-rose-600 hover:bg-rose-500 text-white border-2 border-black shadow-neo-pink transition-all"
           >
             <PhoneOff className="w-6 h-6" />

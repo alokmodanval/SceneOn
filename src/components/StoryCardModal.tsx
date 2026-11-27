@@ -23,23 +23,22 @@ export const StoryCardModal: React.FC<StoryCardModalProps> = ({
   const inviteLink = `https://friendsclub.tools4genz.com/?match=${currentUser.id}`;
 
   useEffect(() => {
-    if (!isOpen) {
-      setCardImage(null);
-      return;
-    }
+    if (!isOpen) return;
     let isCancelled = false;
-    setIsGenerating(true);
 
-    generateStoryCardBlob(currentUser)
-      .then((url) => {
+    async function renderCard() {
+      setIsGenerating(true);
+      try {
+        const url = await generateStoryCardBlob(currentUser);
         if (!isCancelled) setCardImage(url);
-      })
-      .catch((err) => {
+      } catch (err) {
         console.error('Failed to generate story card:', err);
-      })
-      .finally(() => {
+      } finally {
         if (!isCancelled) setIsGenerating(false);
-      });
+      }
+    }
+
+    renderCard();
 
     return () => {
       isCancelled = true;
@@ -78,6 +77,7 @@ export const StoryCardModal: React.FC<StoryCardModalProps> = ({
       <div className="relative w-full max-w-4xl bg-[#111116] border-2 border-[#CCFF00] rounded-2xl p-6 sm:p-8 shadow-neo max-h-[92vh] overflow-y-auto">
         <button
           onClick={onClose}
+          aria-label="Close story card"
           className="absolute top-4 right-4 p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/60 hover:text-white transition-colors"
         >
           <X className="w-5 h-5" />
