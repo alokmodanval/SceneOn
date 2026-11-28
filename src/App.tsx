@@ -53,7 +53,9 @@ export function App() {
   }, [currentUser]);
 
   // Default Landing Tab = ChessChat Arena (first page opens directly onto the Chessboard + Signup/Friends)
-  const [activeTab, setActiveTab] = useState<'chess' | 'voice' | 'matches'>('chess');
+  const [activeTab, setActiveTab] = useState<'chess' | 'voice'>('chess');
+  const [voiceSubTab, setVoiceSubTab] = useState<'rooms' | 'people'>('rooms');
+  const [isChessGameActive, setIsChessGameActive] = useState<boolean>(false);
   const [rooms, setRooms] = useState<SceneRoom[]>([]);
   const [peers, setPeers] = useState<SceneUser[]>([]);
   const [activeRoom, setActiveRoom] = useState<SceneRoom | null>(null);
@@ -493,7 +495,7 @@ export function App() {
         </div>
       )}
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6 pb-28 sm:pb-12">
+      <main className={isChessGameActive ? '' : 'flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6 pb-28 sm:pb-12'}>
         {activeRoom && currentUser ? (
           <VoiceRoomActive
             room={activeRoom}
@@ -507,78 +509,59 @@ export function App() {
           />
         ) : (
           <>
-            {/* Navigation Tabs with ChessChat First */}
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 mb-5">
-              <div className="grid grid-cols-3 sm:flex items-center w-full lg:w-auto gap-1 sm:gap-2">
-                <button
-                  onClick={() => {
-                    playUiSound('click');
-                    setActiveTab('chess');
-                  }}
-                  className={`px-1.5 sm:px-4 lg:px-5 py-3 font-heading font-black text-xs sm:text-sm lg:text-base flex items-center justify-center sm:justify-start gap-1 sm:gap-2 border-b-2 transition-all whitespace-nowrap ${
-                    activeTab === 'chess'
-                      ? 'border-[#CCFF00] text-[#CCFF00]'
-                      : 'border-transparent text-white/50 hover:text-white'
-                  }`}
-                >
-                  <Crown className="w-4 h-4 flex-shrink-0" />
-                  <span className="sm:hidden">Chess</span>
-                  <span className="hidden sm:inline">ChessChat Arena</span>
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300">
-                    CAM
-                  </span>
-                </button>
+            {/* Streamlined 2-Pillar Navigation (hidden during fullscreen zero-scroll chess match) */}
+            {!isChessGameActive && (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 mb-5">
+                <div className="grid grid-cols-2 sm:flex items-center w-full lg:w-auto gap-1 sm:gap-2">
+                  <button
+                    onClick={() => {
+                      playUiSound('click');
+                      setActiveTab('chess');
+                    }}
+                    className={`px-2 sm:px-5 py-3 font-heading font-black text-xs sm:text-sm lg:text-base flex items-center justify-center sm:justify-start gap-1.5 sm:gap-2 border-b-2 transition-all whitespace-nowrap ${
+                      activeTab === 'chess'
+                        ? 'border-[#CCFF00] text-[#CCFF00]'
+                        : 'border-transparent text-white/50 hover:text-white'
+                    }`}
+                  >
+                    <Crown className="w-4 h-4 flex-shrink-0" />
+                    <span>Chess + Video Call</span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300">
+                      LIVE
+                    </span>
+                  </button>
 
-                <button
-                  onClick={() => {
-                    playUiSound('click');
-                    setActiveTab('voice');
-                  }}
-                  className={`px-1.5 sm:px-3.5 lg:px-5 py-3 font-heading font-black text-xs sm:text-sm lg:text-base flex items-center justify-center sm:justify-start gap-1 sm:gap-2 border-b-2 transition-all whitespace-nowrap ${
-                    activeTab === 'voice'
-                      ? 'border-[#CCFF00] text-[#CCFF00]'
-                      : 'border-transparent text-white/50 hover:text-white'
-                  }`}
-                >
-                  <Radio className="w-4 h-4 flex-shrink-0" />
-                  <span className="sm:hidden">Voice</span>
-                  <span className="hidden sm:inline">Live Voice Pods</span>
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-[#CCFF00]/15 text-[#CCFF00]">
-                    {rooms.length}
-                  </span>
-                </button>
+                  <button
+                    onClick={() => {
+                      playUiSound('click');
+                      setActiveTab('voice');
+                    }}
+                    className={`px-2 sm:px-5 py-3 font-heading font-black text-xs sm:text-sm lg:text-base flex items-center justify-center sm:justify-start gap-1.5 sm:gap-2 border-b-2 transition-all whitespace-nowrap ${
+                      activeTab === 'voice'
+                        ? 'border-[#CCFF00] text-[#CCFF00]'
+                        : 'border-transparent text-white/50 hover:text-white'
+                    }`}
+                  >
+                    <Radio className="w-4 h-4 flex-shrink-0" />
+                    <span>Voice Date &amp; Connect</span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-pink-500/20 text-pink-300">
+                      FREE
+                    </span>
+                  </button>
+                </div>
 
-                <button
-                  onClick={() => {
-                    playUiSound('click');
-                    setActiveTab('matches');
-                  }}
-                  className={`px-1.5 sm:px-3.5 lg:px-5 py-3 font-heading font-black text-xs sm:text-sm lg:text-base flex items-center justify-center sm:justify-start gap-1 sm:gap-2 border-b-2 transition-all whitespace-nowrap ${
-                    activeTab === 'matches'
-                      ? 'border-[#CCFF00] text-[#CCFF00]'
-                      : 'border-transparent text-white/50 hover:text-white'
-                  }`}
-                >
-                  <Sparkles className="w-4 h-4 flex-shrink-0" />
-                  <span className="sm:hidden">Players</span>
-                  <span className="hidden sm:inline">Find Players</span>
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-300">
-                    24h
+                <div className="hidden lg:flex items-center gap-2 text-xs font-mono text-white/40 flex-shrink-0">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#CCFF00]" />
+                  <span>
+                    {isD1Connected
+                      ? 'Cloudflare D1 + DO Live'
+                      : isSupabaseConfigured
+                      ? 'Supabase Realtime Live'
+                      : 'P2P Local Mode'}
                   </span>
-                </button>
+                </div>
               </div>
-
-              <div className="hidden lg:flex items-center gap-2 text-xs font-mono text-white/40 flex-shrink-0">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#CCFF00]" />
-                <span>
-                  {isD1Connected
-                    ? 'Cloudflare D1 + DO Live'
-                    : isSupabaseConfigured
-                    ? 'Supabase Realtime Live'
-                    : 'P2P Local Mode'}
-                </span>
-              </div>
-            </div>
+            )}
 
             {activeTab === 'chess' ? (
               <ChessArena
@@ -609,33 +592,94 @@ export function App() {
                 onRemoveFriend={handleRemoveFriendAction}
                 onOpenChat={(u) => setChatTargetUser(u)}
                 onRefreshSocialData={refreshSocialData}
-              />
-            ) : activeTab === 'voice' ? (
-              <LiveVoiceRooms
-                rooms={rooms}
-                currentUser={currentUser}
-                onJoinRoom={handleJoinRoom}
-                onOpenHostModal={() => setIsHostModalOpen(true)}
-                onOpenOnboarding={() => {
-                  setPendingAction('host_room');
-                  setIsOnboardingOpen(true);
-                }}
+                onGameActiveChange={setIsChessGameActive}
               />
             ) : (
-              <SceneBoard
-                peers={peers}
-                currentUser={currentUser}
-                onOpenChat={(peer) => setChatTargetUser(peer)}
-                onOpenOnboarding={() => setIsOnboardingOpen(true)}
-              />
+              <div className="space-y-6 animate-fadeIn">
+                {/* Unified Voice Dating + Connect Hub */}
+                <div className="bg-gradient-to-r from-pink-500/15 via-[#111116] to-[#CCFF00]/15 border-2 border-pink-500/40 rounded-3xl p-5 sm:p-6 flex flex-col sm:flex-row items-center justify-between gap-4">
+                  <div className="space-y-1 text-center sm:text-left">
+                    <span className="text-[11px] font-mono font-bold text-pink-300 uppercase">
+                      ⚡ Voice Dating &amp; Social Connect
+                    </span>
+                    <h2 className="text-xl sm:text-2xl font-heading font-black text-white">
+                      Talk Over Anonymous Voice Before Sharing Identity
+                    </h2>
+                    <p className="text-xs sm:text-sm text-white/70">
+                      Try 3-Minute Blind Voice Date, hop into open voice rooms, or connect directly with online people.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playUiSound('pop');
+                      if (!currentUser) {
+                        setPendingAction('speed_date');
+                        setIsOnboardingOpen(true);
+                      } else {
+                        setIsSpeedDateOpen(true);
+                      }
+                    }}
+                    className="w-full sm:w-auto px-6 py-3.5 rounded-2xl bg-gradient-to-r from-[#CCFF00] via-[#00F0FF] to-[#FF2E93] text-black font-heading font-black text-sm shadow-neo border-2 border-black flex items-center justify-center gap-2 flex-shrink-0"
+                  >
+                    <Heart className="w-4 h-4 fill-black" />
+                    <span>Start 3-Min Voice Date</span>
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setVoiceSubTab('rooms')}
+                    className={`px-4 py-2 rounded-xl font-heading font-bold text-xs border transition-all ${
+                      voiceSubTab === 'rooms'
+                        ? 'bg-[#CCFF00] text-black border-[#CCFF00]'
+                        : 'bg-[#111116] text-white/70 border-white/15'
+                    }`}
+                  >
+                    🎙️ Voice Rooms ({rooms.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVoiceSubTab('people')}
+                    className={`px-4 py-2 rounded-xl font-heading font-bold text-xs border transition-all ${
+                      voiceSubTab === 'people'
+                        ? 'bg-violet-500 text-white border-violet-400'
+                        : 'bg-[#111116] text-white/70 border-white/15'
+                    }`}
+                  >
+                    ✨ People Online ({peers.length})
+                  </button>
+                </div>
+
+                {voiceSubTab === 'rooms' ? (
+                  <LiveVoiceRooms
+                    rooms={rooms}
+                    currentUser={currentUser}
+                    onJoinRoom={handleJoinRoom}
+                    onOpenHostModal={() => setIsHostModalOpen(true)}
+                    onOpenOnboarding={() => {
+                      setPendingAction('host_room');
+                      setIsOnboardingOpen(true);
+                    }}
+                  />
+                ) : (
+                  <SceneBoard
+                    peers={peers}
+                    currentUser={currentUser}
+                    onOpenChat={(peer) => setChatTargetUser(peer)}
+                    onOpenOnboarding={() => setIsOnboardingOpen(true)}
+                  />
+                )}
+              </div>
             )}
           </>
         )}
       </main>
 
-      {/* Mobile Bottom Bar Navigation */}
-      {!(activeRoom && currentUser) && (
-        <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#070709]/95 backdrop-blur-lg border-t border-white/10 px-2 py-2 flex items-center justify-around">
+      {/* Mobile Bottom Bar Navigation (hidden inside active Voice Room OR active Fullscreen Chess Game) */}
+      {!(activeRoom && currentUser) && !isChessGameActive && (
+        <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#070709]/95 backdrop-blur-lg border-t border-white/10 px-3 py-2 flex items-center justify-around">
           <button
             onClick={() => {
               playUiSound('click');
@@ -664,19 +708,6 @@ export function App() {
 
           <button
             onClick={() => {
-              playUiSound('click');
-              setActiveTab('matches');
-            }}
-            className={`flex flex-col items-center gap-0.5 text-[10px] font-mono ${
-              activeTab === 'matches' ? 'text-[#CCFF00] font-bold' : 'text-white/60'
-            }`}
-          >
-            <Sparkles className="w-4 h-4" />
-            <span>Players</span>
-          </button>
-
-          <button
-            onClick={() => {
               playUiSound('pop');
               if (!currentUser) {
                 setPendingAction('speed_date');
@@ -688,7 +719,7 @@ export function App() {
             className="flex flex-col items-center gap-0.5 text-[10px] font-mono text-pink-300 font-bold"
           >
             <Heart className="w-4 h-4 fill-pink-500" />
-            <span>Date</span>
+            <span>Voice Date</span>
           </button>
 
           {currentUser ? (
@@ -717,8 +748,9 @@ export function App() {
         </nav>
       )}
 
-      {/* Production Footer */}
-      <footer className="border-t border-white/10 bg-[#070709] pt-8 pb-24 sm:pb-8 text-center text-xs font-mono text-white/50">
+      {/* Production Footer (hidden during fullscreen chess) */}
+      {!isChessGameActive && (
+        <footer className="border-t border-white/10 bg-[#070709] pt-8 pb-24 sm:pb-8 text-center text-xs font-mono text-white/50">
         <div className="max-w-7xl mx-auto px-4 space-y-2">
           <p className="text-white/80 font-bold">
             ChessChat by{' '}
@@ -737,6 +769,7 @@ export function App() {
           </p>
         </div>
       </footer>
+      )}
 
       {isOnboardingOpen && (
         <OnboardingModal

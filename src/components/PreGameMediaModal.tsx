@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Camera,
   CameraOff,
@@ -182,8 +183,8 @@ export const PreGameMediaModal: React.FC<PreGameMediaModalProps> = ({
     onEnterMatch(stream, cameraOn && stream.getVideoTracks().length > 0, micMuted);
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
+  return createPortal(
+    <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
       <div className="relative w-full max-w-md bg-[#111116] border-2 border-cyan-400 rounded-3xl p-5 sm:p-6 shadow-neo space-y-4">
         <button
           type="button"
@@ -311,6 +312,7 @@ export const PreGameMediaModal: React.FC<PreGameMediaModalProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };

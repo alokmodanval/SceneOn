@@ -7,6 +7,7 @@ import {
   History,
   MessageCircle,
   Search,
+  Sparkles,
   Swords,
   UserMinus,
   UserPlus,
@@ -32,6 +33,7 @@ interface FriendsAndHistoryPanelProps {
   onRespondRequest: (requesterId: string, action: 'accept' | 'decline') => Promise<void>;
   onRemoveFriend: (friendId: string) => Promise<void>;
   onChallengePlayer: (player: { id: string; alias: string; username?: string; avatar: SceneUser['avatar'] }) => void;
+  onReviewGame?: (game: ChessHistoryRecord) => void;
   onOpenChat?: (user: SceneUser) => void;
   onRequireProfile: () => void;
 }
@@ -45,6 +47,7 @@ export const FriendsAndHistoryPanel: React.FC<FriendsAndHistoryPanelProps> = ({
   onRespondRequest,
   onRemoveFriend,
   onChallengePlayer,
+  onReviewGame,
   onOpenChat,
   onRequireProfile,
 }) => {
@@ -456,6 +459,17 @@ export const FriendsAndHistoryPanel: React.FC<FriendsAndHistoryPanelProps> = ({
                       >
                         <UserPlus className="w-3 h-3" />
                         <span>{pendingOutIds.has(oppId) ? 'Requested' : 'Add Friend'}</span>
+                      </button>
+                    )}
+
+                    {g.pgn && onReviewGame && (
+                      <button
+                        type="button"
+                        onClick={() => onReviewGame(g)}
+                        className="px-2.5 py-1 rounded-lg bg-violet-500/20 hover:bg-violet-500/30 border border-violet-400/40 text-violet-200 text-[11px] font-heading font-bold flex items-center gap-1"
+                      >
+                        <Sparkles className="w-3 h-3 text-[#CCFF00]" />
+                        <span>Review</span>
                       </button>
                     )}
 

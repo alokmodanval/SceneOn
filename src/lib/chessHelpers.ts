@@ -8,6 +8,7 @@ export interface ChessTimeOption {
 }
 
 export const CHESS_TIME_OPTIONS: ChessTimeOption[] = [
+  { label: '1 + 0', ms: 60000, badge: 'Bullet' },
   { label: '3 + 0', ms: 180000, badge: 'Blitz' },
   { label: '5 + 0', ms: 300000, badge: 'Rapid' },
   { label: '10 + 0', ms: 600000, badge: 'Classical' },
@@ -86,41 +87,103 @@ export function formatChessClock(ms: number): string {
   return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 }
 
-export function playChessSound(kind: 'move' | 'capture' | 'check' | 'gameover' | 'notify') {
+let cachedNoiseBuffer: AudioBuffer | null = null;
+
+function getWoodNoiseBuffer(ctx: AudioContext): AudioBuffer {
+  if (cachedNoiseBuffer && cachedNoiseBuffer.sampleRate === ctx.sampleRate) {
+    return cachedNoiseBuffer;
+  }
+  const length = Math.floor(ctx.sampleRate * 0.04);
+  const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < length; i++) {
+    data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (ctx.sampleRate * 0.008));
+  }
+  cachedNoiseBuffer = buffer;
+  return buffer;
+}
+
+function scheduleWoodTap(
+  ctx: AudioContext,
+  startAt: number,
+  params: { freqStart: number; freqEnd: number; dur: number; filterHz: number; gain: number }
+) {
+  // Warm wooden body resonance
+  const osc = ctx.createOscillator();
+  const bodyGain = ctx.createGain();
+  osc.type = 'triangle';
+  osc.frequency.setValueAtTime(params.freqStart, startAt);
+  osc.frequency.exponentialRampToValueAtTime(params.freqEnd, startAt + params.dur);
+  bodyGain.gain.setValueAtTime(params.gain, startAt);
+  bodyGain.gain.exponentialRampToValueAtTime(0.001, startAt + params.dur);
+  osc.connect(bodyGain);
+  bodyGain.connect(ctx.destination);
+  osc.start(startAt);
+  osc.stop(startAt + params.dur + 0.01);
+
+  // Short filtered wood-click transient
+  const noise = ctx.createBufferSource();
+  noise.buffer = getWoodNoiseBuffer(ctx);
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'bandpass';
+  filter.frequency.setValueAtTime(params.filterHz, startAt);
+  filter.Q.setValueAtTime(2.2, startAt);
+  const nGain = ctx.createGain();
+  nGain.gain.setValueAtTime(params.gain * 0.85, startAt);
+  nGain.gain.exponentialRampToValueAtTime(0.001, startAt + 0.025);
+  noise.connect(filter);
+  filter.connect(nGain);
+  nGain.connect(ctx.destination);
+  noise.start(startAt);
+  noise.stop(startAt + 0.03);
+}
+
+export function playChessSound(
+  kind: 'move' | 'opponent' | 'capture' | 'castle' | 'promote' | 'check' | 'gameover' | 'notify'
+) {
   try {
     const ctx = getAudioContext();
     const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
 
     if (kind === 'move') {
-      osc.type = 'triangle';
-      osc.frequency.setValueAtTime(240, now);
-      osc.frequency.exponentialRampToValueAtTime(110, now + 0.055);
-      gain.gain.setValueAtTime(0.18, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.055);
-      osc.start(now);
-      osc.stop(now + 0.055);
+      scheduleWoodTap(ctx, now, { freqStart: 175, freqEnd: 74, dur: 0.045, filterHz: 1850, gain: 0.28 });
+    } else if (kind === 'opponent') {
+      scheduleWoodTap(ctx, now, { freqStart: 150, freqEnd: 66, dur: 0.042, filterHz: 1450, gain: 0.24 });
     } else if (kind === 'capture') {
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(320, now);
-      osc.frequency.exponentialRampToValueAtTime(85, now + 0.09);
-      gain.gain.setValueAtTime(0.22, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
-      osc.start(now);
-      osc.stop(now + 0.09);
+      scheduleWoodTap(ctx, now, { freqStart: 245, freqEnd: 56, dur: 0.072, filterHz: 2350, gain: 0.36 });
+    } else if (kind === 'castle') {
+      // Classic two-step wooden tok-tok (King slide + Rook slide)
+      scheduleWoodTap(ctx, now, { freqStart: 175, freqEnd: 75, dur: 0.04, filterHz: 1800, gain: 0.28 });
+      scheduleWoodTap(ctx, now + 0.082, { freqStart: 195, freqEnd: 82, dur: 0.042, filterHz: 2050, gain: 0.3 });
+    } else if (kind === 'promote') {
+      scheduleWoodTap(ctx, now, { freqStart: 200, freqEnd: 80, dur: 0.05, filterHz: 1900, gain: 0.25 });
+      [659.25, 987.77].forEach((freq, i) => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(freq, now + i * 0.055);
+        g.gain.setValueAtTime(0.14, now + i * 0.055);
+        g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.055 + 0.16);
+        o.connect(g);
+        g.connect(ctx.destination);
+        o.start(now + i * 0.055);
+        o.stop(now + i * 0.055 + 0.17);
+      });
     } else if (kind === 'check') {
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(660, now);
-      osc.frequency.exponentialRampToValueAtTime(880, now + 0.14);
-      gain.gain.setValueAtTime(0.18, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
-      osc.start(now);
-      osc.stop(now + 0.15);
+      scheduleWoodTap(ctx, now, { freqStart: 210, freqEnd: 70, dur: 0.055, filterHz: 2200, gain: 0.28 });
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'triangle';
+      o.frequency.setValueAtTime(920, now);
+      o.frequency.exponentialRampToValueAtTime(1280, now + 0.12);
+      g.gain.setValueAtTime(0.16, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start(now);
+      o.stop(now + 0.16);
     } else {
-      const notes = kind === 'gameover' ? [523.25, 659.25, 783.99] : [783.99, 1046.5];
+      const notes = kind === 'gameover' ? [440, 554.37, 659.25] : [783.99, 1046.5];
       notes.forEach((freq, idx) => {
         const o = ctx.createOscillator();
         const g = ctx.createGain();
@@ -131,12 +194,38 @@ export function playChessSound(kind: 'move' | 'capture' | 'check' | 'gameover' |
         o.connect(g);
         g.connect(ctx.destination);
         o.start(now + idx * 0.08);
-        o.stop(now + idx * 0.08 + 0.25);
+        o.stop(now + idx * 0.08 + 0.26);
       });
     }
   } catch {
     // Graceful fallback if audio context blocked
   }
+}
+
+export function playMoveAudio(
+  mv: { san?: string; flags?: string; captured?: string } | null | undefined,
+  inCheck: boolean,
+  isSelf = true
+) {
+  if (inCheck) {
+    playChessSound('check');
+    return;
+  }
+  const san = mv?.san || '';
+  const flags = mv?.flags || '';
+  if (san.startsWith('O-O') || flags.includes('k') || flags.includes('q')) {
+    playChessSound('castle');
+    return;
+  }
+  if (flags.includes('p') || san.includes('=')) {
+    playChessSound('promote');
+    return;
+  }
+  if (mv?.captured || san.includes('x')) {
+    playChessSound('capture');
+    return;
+  }
+  playChessSound(isSelf ? 'move' : 'opponent');
 }
 
 export function computeMaterialSummary(fen: string): {

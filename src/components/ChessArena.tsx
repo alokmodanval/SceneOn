@@ -18,9 +18,9 @@ import {
   RotateCcw,
   Send,
   ShieldCheck,
+  Sparkles,
   Swords,
   UserPlus,
-  Users,
   Video,
   VideoOff,
   Volume2,
@@ -43,6 +43,7 @@ import {
   loadChessGame,
   pickBotMove,
   playChessSound,
+  playMoveAudio,
 } from '../lib/chessHelpers';
 import {
   createSilentAudioStream,
@@ -67,6 +68,7 @@ import {
 import { PreGameMediaModal } from './PreGameMediaModal';
 import { FriendsAndHistoryPanel } from './FriendsAndHistoryPanel';
 import { OnlineBlueTick } from './OnlineBlueTick';
+import { GameReviewModal } from './GameReviewModal';
 
 export interface ExternalChallengeRequest {
   launchKey: string;
@@ -94,6 +96,7 @@ interface ChessArenaProps {
   onRemoveFriend: (friendId: string) => Promise<void>;
   onOpenChat?: (user: SceneUser) => void;
   onRefreshSocialData: () => Promise<void>;
+  onGameActiveChange?: (isActive: boolean) => void;
 }
 
 type PendingLaunch =
@@ -102,6 +105,20 @@ type PendingLaunch =
   | { kind: 'direct_invite'; friend: ChessPlayerInfo; timeControlMs: number }
   | { kind: 'join_game'; gameId: string; timeControlMs: number; opponent?: ChessPlayerInfo }
   | { kind: 'bot'; timeControlMs: number };
+
+interface DragSession {
+  from: Square;
+  piece: { type: PieceSymbol; color: 'w' | 'b' };
+  startX: number;
+  startY: number;
+}
+
+interface DragVisual {
+  active: boolean;
+  clientX: number;
+  clientY: number;
+  hoverSq: Square | null;
+}
 
 const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'] as const;
 const RANKS_WHITE = ['8', '7', '6', '5', '4', '3', '2', '1'] as const;
@@ -113,7 +130,7 @@ const PieceIcon: React.FC<{
   type: PieceSymbol;
   color: 'w' | 'b';
   sizeClass?: string;
-}> = ({ type, color, sizeClass = 'w-7 h-7 sm:w-9 sm:h-9' }) => {
+}> = ({ type, color, sizeClass = 'w-[82%] h-[82%]' }) => {
   const isWhite = color === 'w';
   return (
     <svg
@@ -176,6 +193,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
   onRemoveFriend,
   onOpenChat,
   onRefreshSocialData,
+  onGameActiveChange,
 }) => {
   const [viewMode, setViewMode] = useState<'lobby' | 'searching' | 'game'>('lobby');
   const [gameMode, setGameMode] = useState<'online' | 'bot'>('online');
@@ -196,7 +214,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
       : null
   );
 
-  // Instant First-Screen Name + @username Signup Card state (when !currentUser)
+  // Instant First-Screen Name + @username Signup Card state
   const [quickName, setQuickName] = useState('');
   const [quickUsername, setQuickUsername] = useState('');
   const [usernameEdited, setUsernameEdited] = useState(false);
@@ -213,11 +231,20 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
   const [showcaseSelected, setShowcaseSelected] = useState<Square | null>(null);
   const [selectedSquare, setSelectedSquare] = useState<Square | null>(null);
   const [pendingPromotion, setPendingPromotion] = useState<{ from: Square; to: Square } | null>(null);
+  const [dragSession, setDragSession] = useState<DragSession | null>(null);
+  const [dragVisual, setDragVisual] = useState<DragVisual | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
   const [friendReqSentIds, setFriendReqSentIds] = useState<Record<string, boolean>>({});
   const [clockNow, setClockNow] = useState<number>(() => Date.now());
+  const [showGameOverModal, setShowGameOverModal] = useState(true);
+  const [reviewTarget, setReviewTarget] = useState<{
+    pgn: string;
+    whiteAlias: string;
+    blackAlias: string;
+    orientation: 'w' | 'b';
+  } | null>(null);
 
-  // WebRTC Voice & Video State (Privacy Toggleable Mid-Game)
+  // WebRTC Voice & Video State (Camera ON after pre-check, toggleable OFF anytime)
   const [wsConnected, setWsConnected] = useState(false);
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(false);
@@ -232,12 +259,15 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
   const [remoteMediaStream, setRemoteMediaStream] = useState<MediaStream | null>(null);
   const [mediaNotice, setMediaNotice] = useState<string>('');
 
-  // Side chat & reactions
+  // Slide-over Chat Drawer inside Zero-Scroll Game View
+  const [chatDrawerOpen, setChatDrawerOpen] = useState(false);
+  const [unreadChatCount, setUnreadChatCount] = useState(0);
   const [rightTab, setRightTab] = useState<'chat' | 'moves'>('chat');
   const [chatMessages, setChatMessages] = useState<RoomChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [floatingEmojis, setFloatingEmojis] = useState<{ id: string; emoji: string; x: number }[]>([]);
 
+  const boardContainerRef = useRef<HTMLDivElement | null>(null);
   const meshRef = useRef<WebRTCMeshRoom | null>(null);
   const localAudioStreamRef = useRef<MediaStream | null>(null);
   const localCamStreamRef = useRef<MediaStream | null>(null);
@@ -253,6 +283,9 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
   const botTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isMutedRef = useRef(isMicMuted);
   const viewModeRef = useRef(viewMode);
+  const chessStateRef = useRef(chessState);
+  const chatDrawerOpenRef = useRef(chatDrawerOpen);
+  const myColorRef = useRef(myColor);
   const lastHandledChallengeRef = useRef<string | null>(null);
   const recordedLocalBotIdRef = useRef<string | null>(null);
 
@@ -262,9 +295,37 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
 
   useEffect(() => {
     viewModeRef.current = viewMode;
+    onGameActiveChange?.(viewMode === 'game');
+    return () => {
+      if (viewMode === 'game') onGameActiveChange?.(false);
+    };
+  }, [viewMode, onGameActiveChange]);
+
+  useEffect(() => {
+    chessStateRef.current = chessState;
+  }, [chessState]);
+
+  useEffect(() => {
+    chatDrawerOpenRef.current = chatDrawerOpen;
+  }, [chatDrawerOpen]);
+
+  useEffect(() => {
+    myColorRef.current = myColor;
+  }, [myColor]);
+
+  // Lock background document scroll strictly when Chess Game fullscreen view is active
+  useEffect(() => {
+    if (viewMode !== 'game') return;
+    const prevOverflow = document.body.style.overflow;
+    const prevHtmlOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      document.documentElement.style.overflow = prevHtmlOverflow;
+    };
   }, [viewMode]);
 
-  // Live check @username availability while user types on Screen 1
   useEffect(() => {
     const clean = normalizeUsernameInput(quickUsername);
     if (clean.length < 3) return;
@@ -276,7 +337,6 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
     return () => window.clearTimeout(timer);
   }, [quickUsername]);
 
-  // Handle incoming Friend Challenge accepted from Header Notification Bell / Toast
   useEffect(() => {
     if (!externalChallengeRequest || !currentUser) return;
     if (lastHandledChallengeRef.current === externalChallengeRequest.launchKey) return;
@@ -354,7 +414,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
     }, 1800);
   }, []);
 
-  // Boot Bot Practice Camera preview cleanly if approved in PreGameMediaModal
+  // Boot Bot Practice Camera preview cleanly
   useEffect(() => {
     if (viewMode !== 'game' || gameMode !== 'bot') return;
     const pre = preApprovedMediaRef.current;
@@ -385,7 +445,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
     };
   }, [viewMode, gameMode, activeGameId, stopAllMediaAndSocket]);
 
-  // Connect WebRTC + Durable Object /ws/chess/:gameId when an online match opens
+  // Connect WebRTC + Durable Object /ws/chess/:gameId cleanly
   useEffect(() => {
     if (viewMode !== 'game' || gameMode !== 'online' || !activeGameId || !currentUser) {
       return;
@@ -405,7 +465,6 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
         startCamOn = handoff.cameraOn && baseStream.getVideoTracks().length > 0;
         startMicMuted = handoff.micMuted;
       } else {
-        // Fallback request if user navigated straight in
         try {
           baseStream = await navigator.mediaDevices.getUserMedia({
             video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
@@ -508,6 +567,9 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
           onRoomChat: (msg) => {
             if (!cancelled) {
               setChatMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+              if (!chatDrawerOpenRef.current) {
+                setUnreadChatCount((c) => c + 1);
+              }
             }
           },
           onTopicChange: () => {},
@@ -515,13 +577,41 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
             if (cancelled) return;
             if (raw.type === 'chess_sync' && raw.state) {
               const incoming = raw.state as ChessGameState;
-              setChessState(incoming);
+              const prev = chessStateRef.current;
+
+              // Opponent just made a real-time move: play exact Chess.com opponent sound!
+              if (
+                incoming.moveCount > prev.moveCount &&
+                incoming.turn === myColorRef.current &&
+                incoming.lastMove
+              ) {
+                const checkGame = loadChessGame(incoming.fen);
+                playMoveAudio(
+                  { san: incoming.lastMove.san },
+                  checkGame.inCheck(),
+                  false
+                );
+              }
+
+              // Accept authoritative sync unless it is behind our optimistic move in active play
+              const isResetOrGameOver =
+                incoming.moveCount === 0 ||
+                incoming.status !== 'active' ||
+                prev.status === 'waiting';
+              if (isResetOrGameOver || incoming.moveCount >= prev.moveCount) {
+                setChessState(incoming);
+              }
+
               if (incoming.white?.id === currentUser.id) {
                 setMyColor('w');
-                setBoardOrientation('w');
+                if (prev.status === 'waiting' && incoming.status === 'active') {
+                  setBoardOrientation('w');
+                }
               } else if (incoming.black?.id === currentUser.id) {
                 setMyColor('b');
-                setBoardOrientation('b');
+                if (prev.status === 'waiting' && incoming.status === 'active') {
+                  setBoardOrientation('b');
+                }
               }
             }
           },
@@ -610,6 +700,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
           )
         );
         setChatMessages([]);
+        setShowGameOverModal(true);
         setViewMode('game');
       }
     });
@@ -659,7 +750,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
           }
         }
       }
-    }, 250);
+    }, 200);
 
     return () => window.clearInterval(interval);
   }, [
@@ -674,7 +765,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
     wsConnected,
   ]);
 
-  // Record finished games locally (for bot) + celebrate + refresh D1 history
+  // Celebrate + Save Bot game + Open Game Over card cleanly
   const prevStatusRef = useRef(chessState.status);
   useEffect(() => {
     const prev = prevStatusRef.current;
@@ -687,9 +778,11 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
         chessState.status === 'draw')
     ) {
       playChessSound('gameover');
+      Promise.resolve().then(() => setShowGameOverModal(true));
+
       if (chessState.winner === myColor) {
         confetti({
-          particleCount: 90,
+          particleCount: 80,
           spread: 70,
           origin: { y: 0.6 },
           colors: ['#CCFF00', '#00F0FF', '#8B5CF6'],
@@ -746,32 +839,24 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
 
   const showcaseChess = useMemo(() => loadChessGame(showcaseFen), [showcaseFen]);
 
-  const legalDestinations = useMemo(() => {
-    if (!selectedSquare) return new Map<string, boolean>();
-    const map = new Map<string, boolean>();
-    try {
-      const moves = chessInstance.moves({ square: selectedSquare, verbose: true });
-      for (const m of moves) map.set(m.to, Boolean(m.captured));
-    } catch {
-      // Ignore
-    }
-    return map;
-  }, [chessInstance, selectedSquare]);
+  const activeBoardChess = viewMode === 'lobby' ? showcaseChess : chessInstance;
+  const activeSelectedSq = viewMode === 'lobby' ? showcaseSelected : selectedSquare;
 
-  const showcaseLegal = useMemo(() => {
-    if (!showcaseSelected) return new Map<string, boolean>();
+  const legalDestinations = useMemo(() => {
+    if (!activeSelectedSq) return new Map<string, boolean>();
     const map = new Map<string, boolean>();
     try {
-      const moves = showcaseChess.moves({ square: showcaseSelected, verbose: true });
+      const moves = activeBoardChess.moves({ square: activeSelectedSq, verbose: true });
       for (const m of moves) map.set(m.to, Boolean(m.captured));
     } catch {
       // Ignore
     }
     return map;
-  }, [showcaseChess, showcaseSelected]);
+  }, [activeBoardChess, activeSelectedSq]);
 
   const material = useMemo(() => computeMaterialSummary(chessState.fen), [chessState.fen]);
 
+  // Apply move locally (0ms instant optimistic update!)
   const applyLocalMove = useCallback(
     (from: Square, to: Square, promotion: 'q' | 'r' | 'b' | 'n' = 'q') => {
       const now = Date.now();
@@ -784,8 +869,6 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
           return prev;
         }
         if (!mv) return prev;
-
-        playChessSound(game.inCheck() ? 'check' : mv.captured ? 'capture' : 'move');
 
         let nextW = prev.whiteTimeMs;
         let nextB = prev.blackTimeMs;
@@ -833,108 +916,219 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
     botTimerRef.current = setTimeout(() => {
       const mv = pickBotMove(chessState.fen);
       if (mv) {
+        const checkGame = loadChessGame(chessState.fen, chessState.pgn);
+        try {
+          const played = checkGame.move({
+            from: mv.from as Square,
+            to: mv.to as Square,
+            promotion: mv.promotion || 'q',
+          });
+          if (played) {
+            playMoveAudio(played, checkGame.inCheck(), false);
+          }
+        } catch {
+          // Ignore sound failure if move invalid
+        }
         applyLocalMove(mv.from as Square, mv.to as Square, mv.promotion || 'q');
       }
-    }, 550);
+    }, 350);
 
     return () => {
       if (botTimerRef.current) clearTimeout(botTimerRef.current);
     };
-  }, [viewMode, gameMode, chessState.status, chessState.turn, chessState.fen, myColor, applyLocalMove]);
+  }, [viewMode, gameMode, chessState.status, chessState.turn, chessState.fen, chessState.pgn, myColor, applyLocalMove]);
 
-  const executePlayerMove = (from: Square, to: Square, promotion: 'q' | 'r' | 'b' | 'n' = 'q') => {
-    const testGame = loadChessGame(chessState.fen, chessState.pgn);
-    try {
-      const mv = testGame.move({ from, to, promotion });
-      if (!mv) return;
-      if (gameMode === 'online' && meshRef.current && wsConnected) {
-        playChessSound(testGame.inCheck() ? 'check' : mv.captured ? 'capture' : 'move');
-      }
-    } catch {
-      return;
-    }
-
-    setSelectedSquare(null);
-    setPendingPromotion(null);
-
-    if (gameMode === 'online' && meshRef.current && wsConnected) {
-      meshRef.current.sendCustomJson({ type: 'chess_move', from, to, promotion });
-    } else {
-      applyLocalMove(from, to, promotion);
-    }
-  };
-
-  const handleSquareClick = (sq: Square) => {
-    if (chessState.status !== 'active' && chessState.status !== 'waiting') return;
-    if (gameMode === 'online' && chessState.status === 'waiting') {
-      setMediaNotice('Waiting for your opponent to accept the challenge or open the invite link!');
-      setTimeout(() => setMediaNotice(''), 2500);
-      return;
-    }
-    if (chessState.turn !== myColor) return;
-
-    const piece = chessInstance.get(sq);
-    if (selectedSquare) {
-      if (selectedSquare === sq) {
-        setSelectedSquare(null);
-        return;
-      }
-      if (legalDestinations.has(sq)) {
-        const movingPiece = chessInstance.get(selectedSquare);
-        const isPromo =
-          movingPiece?.type === 'p' &&
-          ((movingPiece.color === 'w' && sq[1] === '8') ||
-            (movingPiece.color === 'b' && sq[1] === '1'));
-        if (isPromo) setPendingPromotion({ from: selectedSquare, to: sq });
-        else executePlayerMove(selectedSquare, sq, 'q');
-        return;
-      }
-      if (piece && piece.color === myColor) {
-        setSelectedSquare(sq);
-        return;
-      }
-      setSelectedSquare(null);
-      return;
-    }
-
-    if (piece && piece.color === myColor) {
-      setSelectedSquare(sq);
-    }
-  };
-
-  // Interactive Sandbox Board right on Screen 1 Showcase before launch
-  const handleShowcaseSquareClick = (sq: Square) => {
-    const piece = showcaseChess.get(sq);
-    if (showcaseSelected) {
-      if (showcaseSelected === sq) {
-        setShowcaseSelected(null);
-        return;
-      }
-      if (showcaseLegal.has(sq)) {
+  const executePlayerMove = useCallback(
+    (from: Square, to: Square, promotion: 'q' | 'r' | 'b' | 'n' = 'q') => {
+      if (viewMode === 'lobby') {
         const g = loadChessGame(showcaseFen);
         try {
-          const mv = g.move({ from: showcaseSelected, to: sq, promotion: 'q' });
-          if (mv) {
-            playChessSound(g.inCheck() ? 'check' : mv.captured ? 'capture' : 'move');
-            setShowcaseFen(g.fen());
-            setShowcaseSelected(null);
-            return;
-          }
+          const mv = g.move({ from, to, promotion });
+          if (!mv) return;
+          playMoveAudio(mv, g.inCheck(), true);
+          setShowcaseFen(g.fen());
+          setShowcaseSelected(null);
         } catch {
           // Ignore
         }
-      }
-      if (piece && piece.color === showcaseChess.turn()) {
-        setShowcaseSelected(sq);
         return;
       }
-      setShowcaseSelected(null);
+
+      const testGame = loadChessGame(chessStateRef.current.fen, chessStateRef.current.pgn);
+      let valid;
+      try {
+        valid = testGame.move({ from, to, promotion });
+        if (!valid) return;
+      } catch {
+        return;
+      }
+
+      setSelectedSquare(null);
+      setPendingPromotion(null);
+
+      // 1) Play sound outside state updater (StrictMode-safe) & run 0ms local optimistic execution
+      playMoveAudio(valid, testGame.inCheck(), true);
+      applyLocalMove(from, to, promotion);
+
+      // 2) Send move over Durable Object WebSocket asynchronously
+      if (gameMode === 'online' && meshRef.current && wsConnected) {
+        meshRef.current.sendCustomJson({ type: 'chess_move', from, to, promotion });
+      }
+    },
+    [viewMode, showcaseFen, applyLocalMove, gameMode, wsConnected]
+  );
+
+  const attemptMoveOrPromo = useCallback(
+    (from: Square, to: Square) => {
+      if (viewMode === 'lobby') {
+        executePlayerMove(from, to, 'q');
+        return;
+      }
+      const movingPiece = chessInstance.get(from);
+      const isPromo =
+        movingPiece?.type === 'p' &&
+        ((movingPiece.color === 'w' && to[1] === '8') ||
+          (movingPiece.color === 'b' && to[1] === '1'));
+      if (isPromo) {
+        setSelectedSquare(null);
+        setPendingPromotion({ from, to });
+      } else {
+        executePlayerMove(from, to, 'q');
+      }
+    },
+    [viewMode, chessInstance, executePlayerMove]
+  );
+
+  // Board Geometry Helper for 60fps Pointer Drag-and-Drop
+  const getSquareFromPoint = useCallback(
+    (clientX: number, clientY: number): Square | null => {
+      const el = boardContainerRef.current;
+      if (!el) return null;
+      const rect = el.getBoundingClientRect();
+      if (
+        clientX < rect.left ||
+        clientX > rect.right ||
+        clientY < rect.top ||
+        clientY > rect.bottom
+      ) {
+        return null;
+      }
+      const col = Math.min(7, Math.max(0, Math.floor(((clientX - rect.left) / rect.width) * 8)));
+      const row = Math.min(7, Math.max(0, Math.floor(((clientY - rect.top) / rect.height) * 8)));
+      const effOrientation = viewMode === 'lobby' ? 'w' : boardOrientation;
+      const files = effOrientation === 'w' ? FILES : FILES_BLACK;
+      const ranks = effOrientation === 'w' ? RANKS_WHITE : RANKS_BLACK;
+      return `${files[col]}${ranks[row]}` as Square;
+    },
+    [viewMode, boardOrientation]
+  );
+
+  // Unified PointerDown: supports BOTH instant 0ms tap-to-move AND smooth drag-and-drop!
+  const handleSquarePointerDown = (e: React.PointerEvent<HTMLButtonElement>, sq: Square) => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+
+    if (viewMode === 'game') {
+      if (chessState.status !== 'active' && chessState.status !== 'waiting') return;
+      if (gameMode === 'online' && chessState.status === 'waiting') {
+        setMediaNotice('Waiting for your opponent to join the game!');
+        setTimeout(() => setMediaNotice(''), 2500);
+        return;
+      }
+      if (chessState.turn !== myColor) return;
+    }
+
+    const activeTurn = viewMode === 'lobby' ? showcaseChess.turn() : myColor;
+    const piece = activeBoardChess.get(sq);
+
+    // If a piece is ALREADY selected and user presses a legal target square, execute at 0ms on pointerdown!
+    if (activeSelectedSq && legalDestinations.has(sq)) {
+      e.preventDefault();
+      attemptMoveOrPromo(activeSelectedSq, sq);
       return;
     }
-    if (piece && piece.color === showcaseChess.turn()) {
-      setShowcaseSelected(sq);
+
+    // If user presses their own piece, select it immediately AND prime smooth drag tracking!
+    if (piece && piece.color === activeTurn) {
+      e.preventDefault();
+      if (viewMode === 'lobby') setShowcaseSelected(sq);
+      else setSelectedSquare(sq);
+
+      setDragSession({
+        from: sq,
+        piece: { type: piece.type, color: piece.color },
+        startX: e.clientX,
+        startY: e.clientY,
+      });
+      setDragVisual({
+        active: false,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        hoverSq: sq,
+      });
+      return;
     }
+
+    // Empty / invalid square clears selection cleanly
+    if (viewMode === 'lobby') setShowcaseSelected(null);
+    else setSelectedSquare(null);
   };
+
+  const legalDestinationsRef = useRef(legalDestinations);
+  const getSquareFromPointRef = useRef(getSquareFromPoint);
+  const attemptMoveOrPromoRef = useRef(attemptMoveOrPromo);
+
+  useEffect(() => {
+    legalDestinationsRef.current = legalDestinations;
+  }, [legalDestinations]);
+
+  useEffect(() => {
+    getSquareFromPointRef.current = getSquareFromPoint;
+  }, [getSquareFromPoint]);
+
+  useEffect(() => {
+    attemptMoveOrPromoRef.current = attemptMoveOrPromo;
+  }, [attemptMoveOrPromo]);
+
+  // Global window pointer tracking (binds strictly once per pointerdown session)
+  useEffect(() => {
+    if (!dragSession) return;
+
+    let wasActivated = false;
+
+    const handleMove = (e: PointerEvent) => {
+      const dist = Math.hypot(e.clientX - dragSession.startX, e.clientY - dragSession.startY);
+      if (dist >= 6) wasActivated = true;
+      const hoverSq = wasActivated ? getSquareFromPointRef.current(e.clientX, e.clientY) : dragSession.from;
+      setDragVisual({
+        active: wasActivated,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        hoverSq,
+      });
+    };
+
+    const handleUp = (e: PointerEvent) => {
+      const dist = Math.hypot(e.clientX - dragSession.startX, e.clientY - dragSession.startY);
+      const didDrag = wasActivated || dist >= 6;
+      const targetSq = getSquareFromPointRef.current(e.clientX, e.clientY);
+      if (didDrag && targetSq && targetSq !== dragSession.from) {
+        if (legalDestinationsRef.current.has(targetSq)) {
+          attemptMoveOrPromoRef.current(dragSession.from, targetSq);
+        }
+      }
+      setDragSession(null);
+      setDragVisual(null);
+    };
+
+    window.addEventListener('pointermove', handleMove, { passive: true });
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
+    return () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
+    };
+  }, [dragSession]);
 
   // Instant Profile Creation on First Screen (Name + Unique @username)
   const ensureProfileAndLaunch = async (launchAfter: PendingLaunch) => {
@@ -1025,6 +1219,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
         })
       );
       setChatMessages([]);
+      setShowGameOverModal(true);
       setViewMode('game');
       return;
     }
@@ -1056,7 +1251,8 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
         )
       );
       setChatMessages([]);
-      setMediaNotice(`Challenge notification sent to ${launch.friend.alias}! Waiting for them to accept...`);
+      setShowGameOverModal(true);
+      setMediaNotice(`Challenge notification sent to ${launch.friend.alias}!`);
       setViewMode('game');
       return;
     }
@@ -1069,6 +1265,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
       setGameMode('online');
       setChessState(createInitialGameState(launch.timeControlMs));
       setChatMessages([]);
+      setShowGameOverModal(true);
       setViewMode('game');
       return;
     }
@@ -1105,10 +1302,11 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
           id: 'bot_intro',
           sender_id: 'bot-tara',
           sender_alias: 'Tara Bot',
-          text: 'Camera & Mic ready! White moves first — good luck ♟️',
+          text: 'Camera & Clear Mic active! Drag & drop ya tap karke khele ♟️',
           created_at: new Date().toISOString(),
         },
       ]);
+      setShowGameOverModal(true);
       setViewMode('game');
     }
   };
@@ -1118,7 +1316,11 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
     stopAllMediaAndSocket();
     setActiveGameId(null);
     setSelectedSquare(null);
+    setDragSession(null);
+    setDragVisual(null);
     setPendingPromotion(null);
+    setChatDrawerOpen(false);
+    setUnreadChatCount(0);
     setViewMode('lobby');
     onClearInitialGame?.();
   };
@@ -1181,7 +1383,6 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
   const toggleCamera = async () => {
     playUiSound('pop');
     if (isCameraOn) {
-      // Turn camera OFF cleanly mid-game (audio stays live!)
       localVideoStream?.getVideoTracks().forEach((t) => t.stop());
       localAudioStreamRef.current?.getVideoTracks().forEach((t) => {
         t.stop();
@@ -1304,6 +1505,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
 
   const handleRematch = () => {
     playUiSound('unlock');
+    setShowGameOverModal(true);
     if (gameMode === 'online' && meshRef.current && wsConnected) {
       meshRef.current.sendCustomJson({ type: 'chess_rematch' });
     } else {
@@ -1322,8 +1524,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
     const showcaseBoard = showcaseChess.board();
 
     return (
-      <div className="space-y-6 animate-fadeIn">
-        {/* Invited via ?chess= banner */}
+      <div className="space-y-6 animate-fadeIn relative">
         {initialGameId && (
           <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-gradient-to-r from-[#CCFF00]/20 via-cyan-500/15 to-violet-500/20 border-2 border-[#CCFF00]">
             <div className="space-y-0.5">
@@ -1354,9 +1555,8 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
           </div>
         )}
 
-        {/* Main First-Page ChessBoard + Onboarding/Social Split Stage */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-          {/* Left: First-Page Interactive Chessboard + Play Modes */}
+          {/* Left: First-Page Interactive Drag & Click Chessboard */}
           <div className="lg:col-span-7 bg-[#111116] border-2 border-white/15 rounded-3xl p-4 sm:p-5 space-y-4 shadow-neo min-w-0">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
@@ -1369,7 +1569,6 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                 </h1>
               </div>
 
-              {/* Time Control Selector */}
               <div className="flex items-center gap-1.5 flex-wrap">
                 {CHESS_TIME_OPTIONS.map((opt) => (
                   <button
@@ -1392,8 +1591,11 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
               </div>
             </div>
 
-            {/* Crisp Interactive Showcase Chessboard Visible Immediately on Load */}
-            <div className="relative w-full max-w-[440px] mx-auto aspect-square rounded-2xl overflow-hidden border-2 border-cyan-400/50 shadow-neo select-none">
+            {/* Interactive Showcase Board (Supports Smooth Drag & Drop + Tap!) */}
+            <div
+              ref={boardContainerRef}
+              className="relative w-full max-w-[440px] mx-auto aspect-square rounded-2xl overflow-hidden border-2 border-cyan-400/50 shadow-neo select-none touch-none"
+            >
               <div className="grid grid-cols-8 grid-rows-8 w-full h-full">
                 {RANKS_WHITE.map((rank, rIdx) =>
                   FILES.map((file, fIdx) => {
@@ -1403,8 +1605,10 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                     const piece = showcaseBoard[rankIndex]?.[fileIndex];
                     const isLight = (fileIndex + rankIndex) % 2 === 0;
                     const isSelected = showcaseSelected === sq;
-                    const isLegalTarget = showcaseLegal.has(sq);
-                    const isCaptureTarget = showcaseLegal.get(sq) === true;
+                    const isLegalTarget = legalDestinations.has(sq);
+                    const isCaptureTarget = legalDestinations.get(sq) === true;
+                    const isDragSource = dragVisual?.active && dragSession?.from === sq;
+                    const isDragHover = dragVisual?.active && dragVisual.hoverSq === sq && isLegalTarget;
 
                     let bgClass = isLight ? 'bg-[#D6D8E4]' : 'bg-[#635985]';
                     if (isSelected) bgClass = 'bg-[#CCFF00]';
@@ -1413,9 +1617,11 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                       <button
                         key={sq}
                         type="button"
-                        onClick={() => handleShowcaseSquareClick(sq)}
+                        onPointerDown={(e) => handleSquarePointerDown(e, sq)}
                         aria-label={`Board ${sq}`}
-                        className={`relative flex items-center justify-center ${bgClass} transition-colors`}
+                        className={`relative flex items-center justify-center ${bgClass} ${
+                          isDragHover ? 'ring-4 ring-inset ring-white' : ''
+                        } focus:outline-none touch-none`}
                       >
                         {fIdx === 0 && (
                           <span
@@ -1435,7 +1641,11 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                             {file}
                           </span>
                         )}
-                        {piece && <PieceIcon type={piece.type} color={piece.color} />}
+                        {piece && (
+                          <span className={`w-full h-full flex items-center justify-center ${isDragSource ? 'opacity-25' : ''}`}>
+                            <PieceIcon type={piece.type} color={piece.color} />
+                          </span>
+                        )}
                         {isLegalTarget && !isCaptureTarget && (
                           <span className="w-3 h-3 rounded-full bg-black/35 pointer-events-none" />
                         )}
@@ -1448,11 +1658,10 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                 )}
               </div>
               <div className="absolute top-2 right-2 px-2 py-0.5 rounded-full bg-black/75 border border-white/15 text-[10px] font-mono text-white/80 pointer-events-none">
-                Interactive Board • Tap to Try
+                Drag or Tap • Instant Play
               </div>
             </div>
 
-            {/* 3 Launch Modes below board */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
               <button
                 type="button"
@@ -1471,7 +1680,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                   <Swords className="w-4 h-4" />
                 </div>
                 <p className="text-[11px] font-body font-medium text-black/80">
-                  Camera check + live human queue
+                  Camera check + live queue
                 </p>
               </button>
 
@@ -1488,7 +1697,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                   <Link2 className="w-4 h-4" />
                 </div>
                 <p className="text-[11px] font-body text-white/65">
-                  Copy board link for any friend
+                  Copy link for any friend
                 </p>
               </button>
 
@@ -1505,13 +1714,13 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                   <ShieldCheck className="w-4 h-4" />
                 </div>
                 <p className="text-[11px] font-body text-white/65">
-                  Warm up solo + test camera/mic
+                  Solo blitz + test camera
                 </p>
               </button>
             </div>
           </div>
 
-          {/* Right Column: Instant Name & @username Form OR Live Friends & Game History */}
+          {/* Right Column */}
           <div className="lg:col-span-5 space-y-4 min-w-0">
             {!currentUser ? (
               <div className="bg-[#111116] border-2 border-[#CCFF00] rounded-3xl p-5 sm:p-6 space-y-4 shadow-neo">
@@ -1527,7 +1736,6 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                   </p>
                 </div>
 
-                {/* Avatar Quick Picker */}
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {QUICK_EMOJIS.map((em) => (
                     <button
@@ -1690,7 +1898,6 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
               </div>
             )}
 
-            {/* Persistent Friends List + Game History Dock */}
             <FriendsAndHistoryPanel
               currentUser={currentUser}
               friendsData={friendsData}
@@ -1711,13 +1918,30 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                   timeControlMs: selectedTimeMs,
                 });
               }}
+              onReviewGame={(g) =>
+                setReviewTarget({
+                  pgn: g.pgn,
+                  whiteAlias: g.whiteAlias || 'White',
+                  blackAlias: g.blackAlias || 'Black',
+                  orientation: g.blackId === currentUser?.id ? 'b' : 'w',
+                })
+              }
               onOpenChat={onOpenChat}
               onRequireProfile={() => setSignupError('Enter Name & @username above to add friends!')}
             />
           </div>
         </div>
 
-        {/* Pre-Game Camera & Mic Permission Check Modal */}
+        {/* Floating Piece Under Cursor/Finger During Showcase Drag */}
+        {dragSession && dragVisual?.active && (
+          <div
+            style={{ left: dragVisual.clientX, top: dragVisual.clientY }}
+            className="fixed z-50 -translate-x-1/2 -translate-y-1/2 w-12 h-12 sm:w-14 sm:h-14 pointer-events-none flex items-center justify-center scale-[1.15]"
+          >
+            <PieceIcon type={dragSession.piece.type} color={dragSession.piece.color} />
+          </div>
+        )}
+
         <PreGameMediaModal
           isOpen={Boolean(pendingLaunch)}
           matchTitle={
@@ -1737,6 +1961,17 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
             void handleMediaCheckConfirmed(stream, camOn, micMuted)
           }
         />
+
+        {reviewTarget && (
+          <GameReviewModal
+            isOpen={true}
+            pgn={reviewTarget.pgn}
+            whiteAlias={reviewTarget.whiteAlias}
+            blackAlias={reviewTarget.blackAlias}
+            initialOrientation={reviewTarget.orientation}
+            onClose={() => setReviewTarget(null)}
+          />
+        )}
       </div>
     );
   }
@@ -1782,7 +2017,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
     );
   }
 
-  // -------------------- ACTIVE CHESS + VIDEO GAME --------------------
+  // -------------------- STATIC ZERO-SCROLL FULLSCREEN CHESS + VIDEO VIEW --------------------
   const oppColor: 'w' | 'b' = myColor === 'w' ? 'b' : 'w';
   const myPlayer = myColor === 'w' ? chessState.white : chessState.black;
   const oppPlayer = oppColor === 'w' ? chessState.white : chessState.black;
@@ -1826,49 +2061,111 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
     setTimeout(() => setMediaNotice(''), 3000);
   };
 
+  const isGameOver = chessState.status !== 'active' && chessState.status !== 'waiting';
+
   return (
-    <div className="space-y-4 animate-fadeIn">
-      {/* Top Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 bg-[#111116] border border-white/15 rounded-2xl px-4 py-3">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="px-2.5 py-1 rounded-lg bg-cyan-500/15 border border-cyan-400/40 text-cyan-300 text-xs font-mono font-bold">
-            ♟️ {gameMode === 'bot' ? 'VS TARA BOT' : wsConnected ? 'LIVE D1/DO SYNC' : 'CONNECTING SYNC...'}
+    <div
+      data-testid="chess-fullscreen-stage"
+      className="fixed inset-0 z-50 h-[100dvh] w-screen overflow-hidden bg-[#070709] text-white flex flex-col justify-between select-none"
+    >
+      {/* Floating Emoji Reaction Layer */}
+      <div className="absolute inset-0 pointer-events-none overflow-hidden z-40">
+        {floatingEmojis.map((item) => (
+          <span
+            key={item.id}
+            style={{ left: `${item.x}%` }}
+            className="absolute bottom-24 text-3xl animate-bounce"
+          >
+            {item.emoji}
           </span>
-          {chessState.status === 'waiting' && (
-            <span className="text-xs font-mono text-amber-300 truncate">
-              Waiting for opponent...
+        ))}
+      </div>
+
+      {/* 1) Top Compact Controls Bar (~40px) */}
+      <div className="h-10 sm:h-11 px-2.5 sm:px-5 bg-[#111116] border-b border-white/10 flex items-center justify-between gap-2 flex-shrink-0">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="px-2 py-0.5 rounded bg-cyan-500/15 border border-cyan-400/40 text-cyan-300 text-[10px] font-mono font-bold whitespace-nowrap">
+            {gameMode === 'bot' ? 'BOT' : wsConnected ? 'LIVE SYNC' : 'SYNCING'}
+          </span>
+          {chessState.drawOfferBy === oppColor && chessState.status === 'active' && (
+            <button
+              type="button"
+              onClick={handleOfferOrAcceptDraw}
+              className="px-2 py-0.5 rounded bg-[#CCFF00] text-black text-[10px] font-heading font-black animate-pulse"
+            >
+              Accept Draw
+            </button>
+          )}
+          {mediaNotice && (
+            <span className="hidden md:inline text-[11px] font-mono text-cyan-200 truncate">
+              {mediaNotice}
             </span>
           )}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 sm:gap-1.5 flex-shrink-0">
           <button
             type="button"
             onClick={() => {
               playUiSound('click');
               setBoardOrientation((o) => (o === 'w' ? 'b' : 'w'));
             }}
-            className="px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/15 text-xs font-mono text-white/80 flex items-center gap-1"
-            title="Flip board"
+            aria-label="Flip board"
+            className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-white/80"
           >
             <ArrowUpDown className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Flip</span>
           </button>
 
           {gameMode === 'online' && activeGameId && (
             <button
               type="button"
               onClick={handleCopyInvite}
-              className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/15 text-xs font-mono text-white flex items-center gap-1.5"
+              className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] font-mono text-white flex items-center gap-1"
             >
               {copiedLink ? <Check className="w-3.5 h-3.5 text-[#CCFF00]" /> : <Copy className="w-3.5 h-3.5" />}
-              <span>{copiedLink ? 'Copied!' : 'Invite Link'}</span>
+              <span className="hidden sm:inline">{copiedLink ? 'Copied' : 'Invite'}</span>
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={() => {
+              setChatDrawerOpen((o) => !o);
+              setUnreadChatCount(0);
+            }}
+            className="relative px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] font-mono text-white flex items-center gap-1"
+          >
+            <MessageSquare className="w-3.5 h-3.5 text-[#CCFF00]" />
+            <span className="hidden sm:inline">Chat/Moves</span>
+            {unreadChatCount > 0 && (
+              <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            disabled={chessState.status !== 'active'}
+            onClick={handleOfferOrAcceptDraw}
+            aria-label="Offer Draw"
+            className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 disabled:opacity-40 border border-white/10 text-cyan-300"
+          >
+            <Handshake className="w-3.5 h-3.5" />
+          </button>
+
+          <button
+            type="button"
+            disabled={chessState.status !== 'active'}
+            onClick={handleResign}
+            aria-label="Resign Match"
+            className="p-1.5 rounded-lg bg-white/5 hover:bg-rose-500/20 disabled:opacity-40 border border-white/10 text-rose-300"
+          >
+            <Flag className="w-3.5 h-3.5" />
+          </button>
+
           <button
             type="button"
             onClick={handleLeaveGame}
-            className="px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-xs font-mono text-rose-300 flex items-center gap-1"
+            className="px-2 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-[11px] font-mono font-bold text-rose-200 flex items-center gap-1"
           >
             <X className="w-3.5 h-3.5" />
             <span>Leave</span>
@@ -1876,509 +2173,468 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
         </div>
       </div>
 
-      {mediaNotice && (
-        <div className="px-4 py-2.5 rounded-xl bg-cyan-500/15 border border-cyan-400/40 text-cyan-200 text-xs font-mono">
-          {mediaNotice}
-        </div>
-      )}
-
-      {chessState.drawOfferBy === oppColor && chessState.status === 'active' && (
-        <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-violet-500/20 border border-violet-400 text-xs font-mono">
-          <span className="text-white font-bold">🤝 Opponent offered a Draw!</span>
-          <button
-            type="button"
-            onClick={handleOfferOrAcceptDraw}
-            className="px-3 py-1.5 rounded-xl bg-[#CCFF00] text-black font-bold"
+      {/* 2) Upper Strip: Very Compact Self Mini-Cam + Quick Mic/Cam Controls + Your Clock */}
+      <div className="px-2.5 sm:px-5 py-1.5 bg-[#0b0b10] border-b border-white/10 flex items-center justify-between gap-2 flex-shrink-0">
+        <div className="flex items-center gap-2 min-w-0">
+          {/* Tiny Self Camera Box (Compact so board gets max height!) */}
+          <div
+            className={`relative w-14 h-11 sm:w-20 sm:h-14 rounded-xl bg-[#111116] border overflow-hidden flex items-center justify-center flex-shrink-0 ${
+              isLocalSpeaking ? 'border-[#CCFF00] ring-1 ring-[#CCFF00]' : 'border-white/20'
+            }`}
           >
-            Accept Draw
-          </button>
-        </div>
-      )}
-
-      {chessState.status !== 'active' && chessState.status !== 'waiting' && (
-        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 rounded-2xl bg-gradient-to-r from-violet-600/30 via-[#111116] to-cyan-600/30 border-2 border-[#CCFF00]">
-          <div>
-            <h3 className="text-base sm:text-lg font-heading font-black text-white">
-              {chessState.winner === 'draw'
-                ? '🤝 Game Drawn!'
-                : chessState.winner === myColor
-                ? '👑 Victory! You Won!'
-                : '💀 Match Over — Opponent Won'}
-            </h3>
-            <p className="text-xs font-mono text-white/70 uppercase">
-              Result: {chessState.status} • Saved to Game History
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {canAddOppFriend && (
-              <button
-                type="button"
-                onClick={() => void handleAddOpponentAsFriend()}
-                className="px-3.5 py-2 rounded-xl bg-[#1D9BF0] text-white font-heading font-bold text-xs flex items-center gap-1.5"
-              >
-                <UserPlus className="w-3.5 h-3.5" />
-                <span>Add Friend</span>
-              </button>
+            <video
+              ref={localVideoElRef}
+              autoPlay
+              playsInline
+              muted
+              className={`w-full h-full object-cover scale-x-[-1] ${isCameraOn ? 'block' : 'hidden'}`}
+            />
+            {!isCameraOn && (
+              <span className="text-lg">
+                {myPlayer?.avatar?.emoji || currentUser?.avatar?.emoji || '⚡'}
+              </span>
             )}
-            <button
-              type="button"
-              onClick={handleRematch}
-              className="px-4 py-2 rounded-xl bg-[#CCFF00] text-black font-heading font-black text-xs flex items-center gap-1.5"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>Rematch Now</span>
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Main Split Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-        {/* Left: Board Column */}
-        <div className="lg:col-span-7 space-y-3 min-w-0">
-          {/* Opponent Player Strip with Blue Online Tick + Add Friend */}
-          <div className="flex items-center justify-between gap-2 bg-[#111116] border border-white/10 rounded-2xl px-3.5 py-2.5">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div
-                className={`w-9 h-9 rounded-xl bg-gradient-to-br ${
-                  oppPlayer?.avatar?.bg || 'from-slate-600 to-slate-800'
-                } flex items-center justify-center text-base border border-white/20 flex-shrink-0 ${
-                  isRemoteSpeaking ? 'ring-2 ring-[#CCFF00]' : ''
-                }`}
-              >
-                {oppPlayer?.avatar?.emoji || '👤'}
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <span className="font-heading font-bold text-sm text-white truncate">
-                    {oppPlayer?.alias || 'Waiting Opponent'}
-                  </span>
-                  {oppPlayer?.id && !oppPlayer.id.startsWith('bot-') && (
-                    <OnlineBlueTick isOnline={oppIsOnline} size="xs" />
-                  )}
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/10 text-white/70">
-                    {oppColor === 'w' ? 'White' : 'Black'}
-                  </span>
-                  {canAddOppFriend && (
-                    <button
-                      type="button"
-                      onClick={() => void handleAddOpponentAsFriend()}
-                      className="px-2 py-0.5 rounded-md bg-[#1D9BF0]/20 hover:bg-[#1D9BF0]/30 border border-[#1D9BF0]/40 text-[#38BDF8] text-[10px] font-mono flex items-center gap-1"
-                    >
-                      <UserPlus className="w-2.5 h-2.5" />
-                      <span>Add</span>
-                    </button>
-                  )}
-                </div>
-                <div className="flex items-center gap-2 text-[10px] font-mono text-white/50">
-                  {oppPlayer?.username && (
-                    <span className="text-cyan-300">@{oppPlayer.username}</span>
-                  )}
-                  <span>
-                    {(oppColor === 'w' ? material.capturedByWhite : material.capturedByBlack).length > 0
-                      ? (oppColor === 'w' ? material.capturedByWhite : material.capturedByBlack)
-                          .map((p) => p.toUpperCase())
-                          .join(' ')
-                      : 'No captures'}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div
-              className={`px-3 py-1.5 rounded-xl font-mono text-sm font-black border flex-shrink-0 ${
-                chessState.status === 'active' && chessState.turn === oppColor
-                  ? 'bg-[#CCFF00] text-black border-[#CCFF00]'
-                  : 'bg-[#070709] text-white/80 border-white/15'
-              }`}
-            >
-              {formatChessClock(oppClockMs)}
-            </div>
           </div>
 
-          {/* 8x8 Interactive Board */}
-          <div className="relative w-full max-w-[480px] mx-auto aspect-square rounded-2xl overflow-hidden border-2 border-white/20 shadow-neo select-none">
-            <div className="grid grid-cols-8 grid-rows-8 w-full h-full">
-              {displayRanks.map((rank, rIdx) =>
-                displayFiles.map((file, fIdx) => {
-                  const sq = `${file}${rank}` as Square;
-                  const rankIndex = 8 - Number(rank);
-                  const fileIndex = FILES.indexOf(file);
-                  const piece = board[rankIndex]?.[fileIndex];
-                  const isLight = (fileIndex + rankIndex) % 2 === 0;
-                  const isSelected = selectedSquare === sq;
-                  const isLegalTarget = legalDestinations.has(sq);
-                  const isCaptureTarget = legalDestinations.get(sq) === true;
-                  const isLastMove =
-                    chessState.lastMove?.from === sq || chessState.lastMove?.to === sq;
-                  const isKingInCheck =
-                    isCheck && piece?.type === 'k' && piece.color === chessState.turn;
-
-                  let bgClass = isLight ? 'bg-[#D6D8E4]' : 'bg-[#635985]';
-                  if (isLastMove) bgClass = isLight ? 'bg-[#D8F36A]' : 'bg-[#8BA83B]';
-                  if (isSelected) bgClass = 'bg-[#CCFF00]';
-                  if (isKingInCheck) bgClass = 'bg-rose-500';
-
-                  return (
-                    <button
-                      key={sq}
-                      type="button"
-                      onClick={() => handleSquareClick(sq)}
-                      aria-label={`Square ${sq}`}
-                      className={`relative flex items-center justify-center ${bgClass} transition-colors focus:outline-none`}
-                    >
-                      {fIdx === 0 && (
-                        <span
-                          className={`absolute top-0.5 left-1 text-[9px] font-mono font-bold ${
-                            isLight ? 'text-slate-700/70' : 'text-white/70'
-                          }`}
-                        >
-                          {rank}
-                        </span>
-                      )}
-                      {rIdx === 7 && (
-                        <span
-                          className={`absolute bottom-0.5 right-1 text-[9px] font-mono font-bold ${
-                            isLight ? 'text-slate-700/70' : 'text-white/70'
-                          }`}
-                        >
-                          {file}
-                        </span>
-                      )}
-                      {piece && <PieceIcon type={piece.type} color={piece.color} />}
-                      {isLegalTarget && !isCaptureTarget && (
-                        <span className="w-3 h-3 sm:w-3.5 sm:h-3.5 rounded-full bg-black/35 pointer-events-none" />
-                      )}
-                      {isLegalTarget && isCaptureTarget && (
-                        <span className="absolute inset-1 rounded-full border-4 border-rose-500/80 pointer-events-none" />
-                      )}
-                    </button>
-                  );
-                })
+          <div className="min-w-0">
+            <div className="flex items-center gap-1">
+              <span className="font-heading font-bold text-xs sm:text-sm text-white truncate">
+                {myPlayer?.alias || currentUser?.alias || 'You'}
+              </span>
+              <span className="text-[10px] font-mono px-1 rounded bg-[#CCFF00]/15 text-[#CCFF00]">
+                {myColor === 'w' ? 'W' : 'B'}
+              </span>
+              {isMyTurn && chessState.status === 'active' && (
+                <span className="text-[10px] font-mono text-[#CCFF00] hidden sm:inline">• Your Turn</span>
               )}
             </div>
 
-            {pendingPromotion && (
-              <div className="absolute inset-0 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-20 p-4">
-                <p className="text-xs font-mono font-bold text-[#CCFF00] uppercase">
-                  Choose Promotion Piece
-                </p>
-                <div className="flex items-center gap-2">
-                  {(['q', 'r', 'b', 'n'] as const).map((promo) => (
-                    <button
-                      key={promo}
-                      type="button"
-                      onClick={() =>
-                        executePlayerMove(pendingPromotion.from, pendingPromotion.to, promo)
-                      }
-                      className="p-3 rounded-2xl bg-[#111116] border-2 border-[#CCFF00] hover:scale-105 transition-transform"
-                    >
-                      <PieceIcon type={promo} color={myColor} />
-                    </button>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setPendingPromotion(null)}
-                  className="text-xs font-mono text-white/60 hover:text-white"
-                >
-                  Cancel
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Your Player Strip */}
-          <div className="flex items-center justify-between gap-2 bg-[#111116] border border-white/15 rounded-2xl px-3.5 py-2.5">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div
-                className={`w-9 h-9 rounded-xl bg-gradient-to-br ${
-                  myPlayer?.avatar?.bg || currentUser?.avatar?.bg || 'from-lime-500 to-emerald-700'
-                } flex items-center justify-center text-base border border-white/20 flex-shrink-0 ${
-                  isLocalSpeaking ? 'ring-2 ring-[#CCFF00]' : ''
-                }`}
-              >
-                {myPlayer?.avatar?.emoji || currentUser?.avatar?.emoji || '⚡'}
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <span className="font-heading font-bold text-sm text-white truncate">
-                    {myPlayer?.alias || currentUser?.alias || 'You'}
-                  </span>
-                  <OnlineBlueTick isOnline={true} size="xs" />
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#CCFF00]/15 text-[#CCFF00]">
-                    {myColor === 'w' ? 'White' : 'Black'}
-                  </span>
-                  {isMyTurn && chessState.status === 'active' && (
-                    <span className="text-[10px] font-mono text-[#CCFF00]">• Your Turn</span>
-                  )}
-                </div>
-                <div className="text-[10px] font-mono text-white/50">
-                  {currentUser?.username && (
-                    <span className="text-cyan-300 mr-2">@{currentUser.username}</span>
-                  )}
-                  {material.advantageWhite !== 0
-                    ? `Material: ${
-                        (myColor === 'w' ? material.advantageWhite : -material.advantageWhite) > 0
-                          ? '+'
-                          : ''
-                      }${myColor === 'w' ? material.advantageWhite : -material.advantageWhite}`
-                    : 'Even'}
-                </div>
-              </div>
-            </div>
-
-            <div
-              className={`px-3 py-1.5 rounded-xl font-mono text-sm font-black border flex-shrink-0 ${
-                chessState.status === 'active' && isMyTurn
-                  ? 'bg-[#CCFF00] text-black border-[#CCFF00]'
-                  : 'bg-[#070709] text-white/80 border-white/15'
-              }`}
-            >
-              {formatChessClock(myClockMs)}
-            </div>
-          </div>
-
-          {/* Match Controls */}
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                disabled={chessState.status !== 'active'}
-                onClick={handleOfferOrAcceptDraw}
-                className="px-3.5 py-2 rounded-xl bg-[#111116] hover:bg-white/5 disabled:opacity-40 border border-white/15 text-xs font-mono text-white/80 flex items-center gap-1.5"
-              >
-                <Handshake className="w-3.5 h-3.5 text-cyan-300" />
-                <span>{chessState.drawOfferBy === myColor ? 'Draw Offered' : 'Draw'}</span>
-              </button>
-              <button
-                type="button"
-                disabled={chessState.status !== 'active'}
-                onClick={handleResign}
-                className="px-3.5 py-2 rounded-xl bg-[#111116] hover:bg-rose-500/15 disabled:opacity-40 border border-white/15 text-xs font-mono text-rose-300 flex items-center gap-1.5"
-              >
-                <Flag className="w-3.5 h-3.5" />
-                <span>Resign</span>
-              </button>
-            </div>
-
-            <div className="flex items-center gap-1.5">
-              {['🔥', '💀', '👏', '👑'].map((emoji) => (
-                <button
-                  key={emoji}
-                  type="button"
-                  onClick={() => handleSendReaction(emoji)}
-                  className="px-2.5 py-1.5 rounded-xl bg-[#111116] hover:bg-white/10 border border-white/10 text-sm transition-transform hover:scale-110"
-                >
-                  {emoji}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Right: Video Chat & Clear Audio + Board Chat / Move History */}
-        <div className="lg:col-span-5 space-y-4 min-w-0">
-          <div className="relative bg-[#111116] border border-cyan-400/30 rounded-3xl p-4 space-y-3 overflow-hidden">
-            <div className="absolute inset-0 pointer-events-none overflow-hidden z-20">
-              {floatingEmojis.map((item) => (
-                <span
-                  key={item.id}
-                  style={{ left: `${item.x}%` }}
-                  className="absolute bottom-6 text-2xl animate-bounce"
-                >
-                  {item.emoji}
-                </span>
-              ))}
-            </div>
-
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <Users className="w-4 h-4 text-cyan-300 flex-shrink-0" />
-                <span className="font-heading font-bold text-sm text-white truncate">
-                  Clear Voice &amp; Camera
-                </span>
-              </div>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#CCFF00]/15 text-[#CCFF00] flex-shrink-0">
-                {gameMode === 'bot'
-                  ? 'Bot Mode'
-                  : remoteConnected
-                  ? '🟢 HD Opus Live'
-                  : '⏳ Waiting Peer'}
-              </span>
-            </div>
-
-            {/* Dual Video / Avatar Stage */}
-            <div className="grid grid-cols-2 gap-2.5">
-              {/* Partner Tile */}
-              <div
-                className={`relative aspect-video rounded-2xl bg-[#070709] border overflow-hidden flex items-center justify-center ${
-                  isRemoteSpeaking ? 'border-[#CCFF00]' : 'border-white/10'
-                }`}
-              >
-                <video
-                  ref={remoteVideoElRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className={`w-full h-full object-cover ${isRemoteCameraOn ? 'block' : 'hidden'}`}
-                />
-                {!isRemoteCameraOn && (
-                  <div className="flex flex-col items-center gap-1 p-2 text-center">
-                    <div
-                      className={`w-11 h-11 rounded-full bg-gradient-to-br ${
-                        oppPlayer?.avatar?.bg || 'from-violet-600 to-indigo-900'
-                      } flex items-center justify-center text-xl`}
-                    >
-                      {oppPlayer?.avatar?.emoji || '♟️'}
-                    </div>
-                    <span className="text-[11px] font-mono text-white/75 truncate max-w-full">
-                      {oppPlayer?.alias || 'Opponent'}
-                    </span>
-                  </div>
-                )}
-                <span className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/75 text-[9px] font-mono text-white/80">
-                  {isRemoteMuted ? '🔇 Muted' : '🎙️ Live'}
-                </span>
-              </div>
-
-              {/* Self Tile */}
-              <div
-                className={`relative aspect-video rounded-2xl bg-[#070709] border overflow-hidden flex items-center justify-center ${
-                  isLocalSpeaking ? 'border-[#CCFF00]' : 'border-white/10'
-                }`}
-              >
-                <video
-                  ref={localVideoElRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className={`w-full h-full object-cover scale-x-[-1] ${isCameraOn ? 'block' : 'hidden'}`}
-                />
-                {!isCameraOn && (
-                  <div className="flex flex-col items-center gap-1 p-2 text-center">
-                    <div
-                      className={`w-11 h-11 rounded-full bg-gradient-to-br ${
-                        myPlayer?.avatar?.bg || currentUser?.avatar?.bg || 'from-lime-500 to-emerald-700'
-                      } flex items-center justify-center text-xl`}
-                    >
-                      {myPlayer?.avatar?.emoji || currentUser?.avatar?.emoji || '⚡'}
-                    </div>
-                    <span className="text-[11px] font-mono text-white/75 truncate max-w-full">
-                      You (Cam Off)
-                    </span>
-                  </div>
-                )}
-                <span className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/75 text-[9px] font-mono text-white/80">
-                  {isMicMuted ? '🔇 Mic Off' : '🎙️ Clear Mic'}
-                </span>
-              </div>
-            </div>
-
-            {/* Mic, Camera & Speaker Clarity Controls */}
-            <div className="grid grid-cols-2 gap-2">
+            {/* Inline Quick Mic / Cam / Speaker Buttons */}
+            <div className="flex items-center gap-1 mt-0.5">
               <button
                 type="button"
                 onClick={toggleMic}
-                className={`py-2.5 px-3 rounded-xl font-heading font-bold text-xs flex items-center justify-center gap-1.5 border transition-all ${
+                aria-label={isMicMuted ? 'Unmute Mic' : 'Mute Mic'}
+                className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold flex items-center gap-1 border ${
                   isMicMuted
-                    ? 'bg-[#070709] text-white/80 border-white/15 hover:border-white/35'
+                    ? 'bg-[#111116] text-white/70 border-white/15'
                     : 'bg-[#CCFF00] text-black border-[#CCFF00]'
                 }`}
               >
-                {isMicMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
-                <span>{isMicMuted ? 'Mic On' : 'Mute Mic'}</span>
+                {isMicMuted ? <MicOff className="w-3 h-3" /> : <Mic className="w-3 h-3" />}
+                <span>{isMicMuted ? 'Mic' : 'On'}</span>
               </button>
 
               <button
                 type="button"
                 onClick={toggleCamera}
-                className={`py-2.5 px-3 rounded-xl font-heading font-bold text-xs flex items-center justify-center gap-1.5 border transition-all ${
+                aria-label={isCameraOn ? 'Turn Camera Off' : 'Turn Camera On'}
+                className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold flex items-center gap-1 border ${
                   isCameraOn
                     ? 'bg-cyan-400 text-black border-cyan-400'
-                    : 'bg-[#070709] text-white/80 border-white/15 hover:border-cyan-400/50'
+                    : 'bg-[#111116] text-white/70 border-white/15'
                 }`}
               >
-                {isCameraOn ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
-                <span>{isCameraOn ? 'Turn Cam Off' : 'Turn Cam On'}</span>
+                {isCameraOn ? <Video className="w-3 h-3" /> : <VideoOff className="w-3 h-3" />}
+                <span>{isCameraOn ? 'Cam On' : 'Cam Off'}</span>
               </button>
-            </div>
 
-            {/* Opponent Audio Clarity / Volume Slider */}
-            <div className="flex items-center gap-2.5 px-3 py-2 rounded-xl bg-[#070709] border border-white/10">
               <button
                 type="button"
                 onClick={handleToggleSpeaker}
-                aria-label="Toggle opponent speaker audio"
-                className="text-white/80 hover:text-[#CCFF00]"
+                aria-label="Toggle opponent audio"
+                className="p-1 rounded-md bg-[#111116] border border-white/15 text-white/75"
               >
-                {speakerMuted ? <VolumeX className="w-4 h-4 text-rose-400" /> : <Volume2 className="w-4 h-4 text-[#CCFF00]" />}
+                {speakerMuted ? (
+                  <VolumeX className="w-3 h-3 text-rose-400" />
+                ) : (
+                  <Volume2 className="w-3 h-3 text-[#CCFF00]" />
+                )}
               </button>
-              <span className="text-[10px] font-mono text-white/60 whitespace-nowrap">
-                Voice Vol
-              </span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={speakerMuted ? 0 : speakerVolume}
-                onChange={(e) => handleVolumeChange(Number(e.target.value))}
-                className="flex-1 accent-[#CCFF00] h-1.5 cursor-pointer"
-              />
-              <span className="text-[10px] font-mono text-cyan-300 whitespace-nowrap">
-                AEC ON
-              </span>
             </div>
           </div>
+        </div>
 
-          {/* Board Chat / Move History Card */}
-          <div className="bg-[#111116] border border-white/15 rounded-3xl overflow-hidden flex flex-col h-[270px]">
+        {/* Your Clock */}
+        <div
+          className={`px-2.5 sm:px-3.5 py-1.5 rounded-xl font-mono text-sm sm:text-base font-black border flex-shrink-0 ${
+            chessState.status === 'active' && isMyTurn
+              ? 'bg-[#CCFF00] text-black border-[#CCFF00]'
+              : 'bg-[#111116] text-white/80 border-white/15'
+          }`}
+        >
+          {formatChessClock(myClockMs)}
+        </div>
+      </div>
+
+      {/* 3) Middle Auto-Fitted 8x8 Chessboard (Zero Scroll on EVERY screen!) */}
+      <div className="flex-1 min-h-0 flex items-center justify-center p-1 sm:p-2 overflow-hidden">
+        <div
+          ref={boardContainerRef}
+          className="relative w-[min(95vw,calc(100dvh-208px))] sm:w-[min(84vw,calc(100dvh-222px))] lg:w-[min(560px,calc(100dvh-224px))] aspect-square rounded-2xl overflow-hidden border-2 border-white/25 shadow-neo touch-none select-none"
+        >
+          <div className="grid grid-cols-8 grid-rows-8 w-full h-full">
+            {displayRanks.map((rank, rIdx) =>
+              displayFiles.map((file, fIdx) => {
+                const sq = `${file}${rank}` as Square;
+                const rankIndex = 8 - Number(rank);
+                const fileIndex = FILES.indexOf(file);
+                const piece = board[rankIndex]?.[fileIndex];
+                const isLight = (fileIndex + rankIndex) % 2 === 0;
+                const isSelected = selectedSquare === sq;
+                const isLegalTarget = legalDestinations.has(sq);
+                const isCaptureTarget = legalDestinations.get(sq) === true;
+                const isLastMove =
+                  chessState.lastMove?.from === sq || chessState.lastMove?.to === sq;
+                const isKingInCheck =
+                  isCheck && piece?.type === 'k' && piece.color === chessState.turn;
+                const isDragSource = dragVisual?.active && dragSession?.from === sq;
+                const isDragHover = dragVisual?.active && dragVisual.hoverSq === sq && isLegalTarget;
+
+                let bgClass = isLight ? 'bg-[#D6D8E4]' : 'bg-[#635985]';
+                if (isLastMove) bgClass = isLight ? 'bg-[#D8F36A]' : 'bg-[#8BA83B]';
+                if (isSelected) bgClass = 'bg-[#CCFF00]';
+                if (isKingInCheck) bgClass = 'bg-rose-500';
+
+                return (
+                  <button
+                    key={sq}
+                    type="button"
+                    onPointerDown={(e) => handleSquarePointerDown(e, sq)}
+                    aria-label={`Square ${sq}`}
+                    className={`relative flex items-center justify-center ${bgClass} ${
+                      isDragHover ? 'ring-4 ring-inset ring-white' : ''
+                    } focus:outline-none touch-none`}
+                  >
+                    {fIdx === 0 && (
+                      <span
+                        className={`absolute top-0.5 left-1 text-[8px] sm:text-[9px] font-mono font-bold ${
+                          isLight ? 'text-slate-700/70' : 'text-white/70'
+                        }`}
+                      >
+                        {rank}
+                      </span>
+                    )}
+                    {rIdx === 7 && (
+                      <span
+                        className={`absolute bottom-0.5 right-1 text-[8px] sm:text-[9px] font-mono font-bold ${
+                          isLight ? 'text-slate-700/70' : 'text-white/70'
+                        }`}
+                      >
+                        {file}
+                      </span>
+                    )}
+                    {piece && (
+                      <span className={`w-full h-full flex items-center justify-center ${isDragSource ? 'opacity-25' : ''}`}>
+                        <PieceIcon type={piece.type} color={piece.color} />
+                      </span>
+                    )}
+                    {isLegalTarget && !isCaptureTarget && (
+                      <span className="w-3 h-3 rounded-full bg-black/35 pointer-events-none" />
+                    )}
+                    {isLegalTarget && isCaptureTarget && (
+                      <span className="absolute inset-1 rounded-full border-4 border-rose-500/80 pointer-events-none" />
+                    )}
+                  </button>
+                );
+              })
+            )}
+          </div>
+
+          {pendingPromotion && (
+            <div className="absolute inset-0 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-20 p-4">
+              <p className="text-xs font-mono font-bold text-[#CCFF00] uppercase">
+                Choose Promotion Piece
+              </p>
+              <div className="flex items-center gap-2">
+                {(['q', 'r', 'b', 'n'] as const).map((promo) => (
+                  <button
+                    key={promo}
+                    type="button"
+                    onClick={() =>
+                      executePlayerMove(pendingPromotion.from, pendingPromotion.to, promo)
+                    }
+                    className="p-3 rounded-2xl bg-[#111116] border-2 border-[#CCFF00] hover:scale-105 transition-transform"
+                  >
+                    <PieceIcon type={promo} color={myColor} sizeClass="w-10 h-10" />
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingPromotion(null)}
+                className="text-xs font-mono text-white/60 hover:text-white"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {/* Game Over Overlay Card with Post-Game Review + Rematch + Add Friend */}
+          {isGameOver && showGameOverModal && (
+            <div className="absolute inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 z-30">
+              <div className="w-full max-w-xs bg-[#111116] border-2 border-[#CCFF00] rounded-3xl p-4 sm:p-5 text-center space-y-3 shadow-neo">
+                <div className="space-y-1">
+                  <h3 className="text-lg font-heading font-black text-white">
+                    {chessState.winner === 'draw'
+                      ? '🤝 Game Drawn!'
+                      : chessState.winner === myColor
+                      ? '👑 Victory! You Won!'
+                      : '💀 Match Over'}
+                  </h3>
+                  <p className="text-[11px] font-mono text-white/65 uppercase">
+                    Result: {chessState.status} • Saved to History
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  {chessState.pgn && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setReviewTarget({
+                          pgn: chessState.pgn,
+                          whiteAlias: chessState.white?.alias || 'White',
+                          blackAlias: chessState.black?.alias || 'Black',
+                          orientation: myColor,
+                        })
+                      }
+                      className="w-full py-2.5 rounded-xl bg-gradient-to-r from-violet-500 to-cyan-500 text-white font-heading font-black text-xs flex items-center justify-center gap-1.5"
+                    >
+                      <Sparkles className="w-4 h-4 text-[#CCFF00]" />
+                      <span>📊 Game Review (Brilliant &amp; Blunders)</span>
+                    </button>
+                  )}
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={handleRematch}
+                      className="py-2.5 rounded-xl bg-[#CCFF00] text-black font-heading font-black text-xs flex items-center justify-center gap-1"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Rematch</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowGameOverModal(false)}
+                      className="py-2.5 rounded-xl bg-white/10 text-white text-xs font-mono"
+                    >
+                      Inspect Board
+                    </button>
+                  </div>
+
+                  {canAddOppFriend && (
+                    <button
+                      type="button"
+                      onClick={() => void handleAddOpponentAsFriend()}
+                      className="w-full py-2 rounded-xl bg-[#1D9BF0]/20 border border-[#1D9BF0]/40 text-[#38BDF8] text-xs font-heading font-bold flex items-center justify-center gap-1.5"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>Add {oppPlayer?.alias} as Friend</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 4) Bottom Strip: Opponent Video Call Feed + Name + Blue Tick + Clock */}
+      <div className="px-2.5 sm:px-5 py-1.5 sm:py-2 bg-[#111116] border-t border-white/10 flex items-center justify-between gap-2.5 flex-shrink-0">
+        <div className="flex items-center gap-2.5 min-w-0">
+          {/* Larger Opponent Live Camera Card */}
+          <div
+            className={`relative w-20 h-14 sm:w-28 sm:h-20 rounded-xl bg-[#070709] border-2 overflow-hidden flex items-center justify-center flex-shrink-0 ${
+              isRemoteSpeaking ? 'border-[#CCFF00] shadow-glow-lime' : 'border-cyan-400/35'
+            }`}
+          >
+            <video
+              ref={remoteVideoElRef}
+              autoPlay
+              playsInline
+              muted
+              className={`w-full h-full object-cover ${isRemoteCameraOn ? 'block' : 'hidden'}`}
+            />
+            {!isRemoteCameraOn && (
+              <div className="flex flex-col items-center gap-0.5 text-center p-1">
+                <span className="text-xl sm:text-2xl">
+                  {oppPlayer?.avatar?.emoji || '♟️'}
+                </span>
+                <span className="text-[9px] font-mono text-white/50 truncate max-w-full">
+                  {gameMode === 'bot' ? 'AI' : remoteConnected ? 'Cam Off' : 'Waiting'}
+                </span>
+              </div>
+            )}
+            <span className="absolute bottom-0.5 left-1 px-1 rounded bg-black/75 text-[9px] font-mono text-white/85">
+              {isRemoteMuted ? '🔇' : '🎙️'}
+            </span>
+          </div>
+
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className="font-heading font-black text-xs sm:text-base text-white truncate">
+                {oppPlayer?.alias || 'Waiting Opponent'}
+              </span>
+              {oppPlayer?.id && !oppPlayer.id.startsWith('bot-') && (
+                <OnlineBlueTick isOnline={oppIsOnline} size="xs" />
+              )}
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/10 text-white/75">
+                {oppColor === 'w' ? 'W' : 'B'}
+              </span>
+              {canAddOppFriend && (
+                <button
+                  type="button"
+                  onClick={() => void handleAddOpponentAsFriend()}
+                  className="px-2 py-0.5 rounded bg-[#1D9BF0]/20 border border-[#1D9BF0]/40 text-[#38BDF8] text-[10px] font-mono flex items-center gap-1"
+                >
+                  <UserPlus className="w-3 h-3" />
+                  <span>Add</span>
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2 text-[10px] sm:text-xs font-mono text-white/55">
+              {oppPlayer?.username && (
+                <span className="text-cyan-300 truncate">@{oppPlayer.username}</span>
+              )}
+              <span className="truncate">
+                {(oppColor === 'w' ? material.capturedByWhite : material.capturedByBlack).length > 0
+                  ? (oppColor === 'w' ? material.capturedByWhite : material.capturedByBlack)
+                      .map((p) => p.toUpperCase())
+                      .join(' ')
+                  : 'No captures'}
+              </span>
+            </div>
+
+            {isGameOver && !showGameOverModal && chessState.pgn && (
+              <button
+                type="button"
+                onClick={() =>
+                  setReviewTarget({
+                    pgn: chessState.pgn,
+                    whiteAlias: chessState.white?.alias || 'White',
+                    blackAlias: chessState.black?.alias || 'Black',
+                    orientation: myColor,
+                  })
+                }
+                className="mt-1 px-2 py-0.5 rounded bg-violet-500/25 border border-violet-400/50 text-[10px] font-mono text-violet-200 font-bold"
+              >
+                📊 Game Review
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Opponent Clock */}
+        <div
+          className={`px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl font-mono text-sm sm:text-lg font-black border flex-shrink-0 ${
+            chessState.status === 'active' && chessState.turn === oppColor
+              ? 'bg-[#CCFF00] text-black border-[#CCFF00]'
+              : 'bg-[#070709] text-white/80 border-white/15'
+          }`}
+        >
+          {formatChessClock(oppClockMs)}
+        </div>
+      </div>
+
+      {/* Floating Piece Overlay Under Active Pointer Drag */}
+      {dragSession && dragVisual?.active && (
+        <div
+          style={{ left: dragVisual.clientX, top: dragVisual.clientY }}
+          className="fixed z-[70] -translate-x-1/2 -translate-y-1/2 w-12 h-12 sm:w-16 sm:h-16 pointer-events-none flex items-center justify-center scale-[1.15]"
+        >
+          <PieceIcon type={dragSession.piece.type} color={dragSession.piece.color} />
+        </div>
+      )}
+
+      {/* Slide-Over Chat, Voice Volume, Reactions & Moves Drawer (Does NOT cause scroll!) */}
+      {chatDrawerOpen && (
+        <div className="fixed inset-0 z-40 bg-black/60 backdrop-blur-xs flex justify-end">
+          <div className="w-full max-w-sm h-full bg-[#111116] border-l border-white/15 flex flex-col p-4 space-y-3">
+            <div className="flex items-center justify-between border-b border-white/10 pb-2">
+              <span className="font-heading font-black text-sm text-white">
+                Audio Settings, Chat &amp; Moves
+              </span>
+              <button
+                type="button"
+                onClick={() => setChatDrawerOpen(false)}
+                className="p-1.5 rounded-lg bg-white/5 text-white/70"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Opponent Volume Slider + Quick Reactions */}
+            <div className="p-3 rounded-2xl bg-[#070709] border border-white/10 space-y-2.5">
+              <div className="flex items-center gap-2">
+                <Volume2 className="w-4 h-4 text-[#CCFF00]" />
+                <span className="text-[11px] font-mono text-white/70">Voice Vol</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={speakerMuted ? 0 : speakerVolume}
+                  onChange={(e) => handleVolumeChange(Number(e.target.value))}
+                  className="flex-1 accent-[#CCFF00] h-1.5 cursor-pointer"
+                />
+                <span className="text-[10px] font-mono text-cyan-300">AEC</span>
+              </div>
+              <div className="flex items-center justify-between gap-1">
+                {['🔥', '💀', '👏', '👑', '🤝'].map((emoji) => (
+                  <button
+                    key={emoji}
+                    type="button"
+                    onClick={() => handleSendReaction(emoji)}
+                    className="flex-1 py-1.5 rounded-xl bg-white/5 hover:bg-white/15 text-base"
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Chat / Moves Tabs */}
             <div className="flex border-b border-white/10">
               <button
                 type="button"
                 onClick={() => setRightTab('chat')}
-                className={`flex-1 py-2.5 text-xs font-mono font-bold flex items-center justify-center gap-1.5 border-b-2 ${
+                className={`flex-1 py-2 text-xs font-mono font-bold border-b-2 ${
                   rightTab === 'chat'
                     ? 'border-[#CCFF00] text-[#CCFF00]'
                     : 'border-transparent text-white/50'
                 }`}
               >
-                <MessageSquare className="w-3.5 h-3.5" />
-                <span>Board Chat ({chatMessages.length})</span>
+                Chat ({chatMessages.length})
               </button>
               <button
                 type="button"
                 onClick={() => setRightTab('moves')}
-                className={`flex-1 py-2.5 text-xs font-mono font-bold flex items-center justify-center gap-1.5 border-b-2 ${
+                className={`flex-1 py-2 text-xs font-mono font-bold border-b-2 ${
                   rightTab === 'moves'
                     ? 'border-cyan-400 text-cyan-300'
                     : 'border-transparent text-white/50'
                 }`}
               >
-                <span>Move History ({parsedMoves.length})</span>
+                Move History ({parsedMoves.length})
               </button>
             </div>
 
             {rightTab === 'chat' ? (
-              <>
-                <div className="flex-1 overflow-y-auto p-3 space-y-2 text-xs">
-                  {chatMessages.length === 0 ? (
-                    <p className="text-center text-white/40 font-mono py-8">
-                      Drop a glhf or chat live during moves...
-                    </p>
-                  ) : (
-                    chatMessages.map((m) => (
-                      <div key={m.id} className="leading-relaxed">
-                        <span className="font-mono font-bold text-[#CCFF00] mr-1.5">
-                          {m.sender_alias}:
-                        </span>
-                        <span className="text-white/85 break-words">{m.text}</span>
-                      </div>
-                    ))
-                  )}
+              <div className="flex-1 flex flex-col min-h-0">
+                <div className="flex-1 overflow-y-auto space-y-2 text-xs pr-1">
+                  {chatMessages.map((m) => (
+                    <div key={m.id} className="leading-relaxed">
+                      <span className="font-mono font-bold text-[#CCFF00] mr-1.5">
+                        {m.sender_alias}:
+                      </span>
+                      <span className="text-white/85 break-words">{m.text}</span>
+                    </div>
+                  ))}
                 </div>
-                <form onSubmit={handleSendChat} className="p-2.5 border-t border-white/10 flex gap-2">
+                <form onSubmit={handleSendChat} className="pt-2 flex gap-2">
                   <input
                     type="text"
                     value={chatInput}
@@ -2394,33 +2650,36 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                     <Send className="w-4 h-4" />
                   </button>
                 </form>
-              </>
+              </div>
             ) : (
-              <div className="flex-1 overflow-y-auto p-3">
-                {parsedMoves.length === 0 ? (
-                  <p className="text-center text-white/40 font-mono text-xs py-8">
-                    No moves played yet.
-                  </p>
-                ) : (
-                  <div className="grid grid-cols-2 gap-1.5 font-mono text-xs">
-                    {Array.from({ length: Math.ceil(parsedMoves.length / 2) }).map((_, i) => (
-                      <React.Fragment key={i}>
-                        <div className="px-2.5 py-1 rounded bg-[#070709] text-white/90">
-                          <span className="text-white/40 mr-2">{i + 1}.</span>
-                          {parsedMoves[i * 2]}
-                        </div>
-                        <div className="px-2.5 py-1 rounded bg-[#070709] text-cyan-200">
-                          {parsedMoves[i * 2 + 1] || ''}
-                        </div>
-                      </React.Fragment>
-                    ))}
-                  </div>
-                )}
+              <div className="flex-1 overflow-y-auto grid grid-cols-2 gap-1.5 font-mono text-xs content-start">
+                {Array.from({ length: Math.ceil(parsedMoves.length / 2) }).map((_, i) => (
+                  <React.Fragment key={i}>
+                    <div className="px-2.5 py-1 rounded bg-[#070709] text-white/90">
+                      <span className="text-white/40 mr-2">{i + 1}.</span>
+                      {parsedMoves[i * 2]}
+                    </div>
+                    <div className="px-2.5 py-1 rounded bg-[#070709] text-cyan-200">
+                      {parsedMoves[i * 2 + 1] || ''}
+                    </div>
+                  </React.Fragment>
+                ))}
               </div>
             )}
           </div>
         </div>
-      </div>
+      )}
+
+      {reviewTarget && (
+        <GameReviewModal
+          isOpen={true}
+          pgn={reviewTarget.pgn}
+          whiteAlias={reviewTarget.whiteAlias}
+          blackAlias={reviewTarget.blackAlias}
+          initialOrientation={reviewTarget.orientation}
+          onClose={() => setReviewTarget(null)}
+        />
+      )}
     </div>
   );
 };
