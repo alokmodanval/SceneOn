@@ -345,6 +345,10 @@ export class LobbyHub extends DurableObject<Env> {
 }
 
 export class RoomRelay extends DurableObject<Env> {
+  private cachedChess: Chess | null = null;
+  private cachedFen = '';
+  private cachedRound = 0;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.blockConcurrencyWhile(async () => {
@@ -669,16 +673,21 @@ export class RoomRelay extends DurableObject<Env> {
         if (state.turn === 'w' && white && white.id !== senderId) return;
         if (state.turn === 'b' && black && black.id !== senderId) return;
 
-        let chess = new Chess();
-        if (state.pgn) {
-          try {
-            chess.loadPgn(state.pgn);
-          } catch {
+        let chess: Chess;
+        if (this.cachedChess && this.cachedFen === state.fen && this.cachedRound === state.round_num) {
+          chess = this.cachedChess;
+        } else {
+          chess = new Chess();
+          if (state.pgn) {
+            try {
+              chess.loadPgn(state.pgn);
+            } catch {
+              chess = new Chess(state.fen);
+            }
+          }
+          if (chess.fen() !== state.fen) {
             chess = new Chess(state.fen);
           }
-        }
-        if (chess.fen() !== state.fen) {
-          chess = new Chess(state.fen);
         }
 
         const from = typeof msg.from === 'string' ? msg.from : '';
@@ -718,10 +727,16 @@ export class RoomRelay extends DurableObject<Env> {
             state.winner = 'draw';
           }
 
+          this.cachedChess = chess;
+          this.cachedFen = state.fen;
+          this.cachedRound = state.round_num;
+
+          // Flush WebSocket sync to opponent BEFORE disk SQLite write to cut relay latency
+          this.broadcastToAll(this.formatChessSyncPayload(state));
           this.saveChessState(state);
           this.persistCompletedGameIfNeeded(state, meta?.gameId);
-          this.broadcastToAll(this.formatChessSyncPayload(state));
         } catch {
+          this.cachedChess = null;
           // Illegal move ignored safely
         }
         return;
@@ -739,9 +754,9 @@ export class RoomRelay extends DurableObject<Env> {
         } else {
           return;
         }
+        this.broadcastToAll(this.formatChessSyncPayload(state));
         this.saveChessState(state);
         this.persistCompletedGameIfNeeded(state, meta?.gameId);
-        this.broadcastToAll(this.formatChessSyncPayload(state));
         return;
       }
 
@@ -751,9 +766,9 @@ export class RoomRelay extends DurableObject<Env> {
         state.winner = loser === 'w' ? 'b' : 'w';
         if (loser === 'w') state.white_time_ms = 0;
         else state.black_time_ms = 0;
+        this.broadcastToAll(this.formatChessSyncPayload(state));
         this.saveChessState(state);
         this.persistCompletedGameIfNeeded(state, meta?.gameId);
-        this.broadcastToAll(this.formatChessSyncPayload(state));
         return;
       }
 
@@ -763,8 +778,8 @@ export class RoomRelay extends DurableObject<Env> {
         if (white?.id === senderId) state.draw_offer_by = 'w';
         else if (black?.id === senderId) state.draw_offer_by = 'b';
         else return;
-        this.saveChessState(state);
         this.broadcastToAll(this.formatChessSyncPayload(state));
+        this.saveChessState(state);
         return;
       }
 
@@ -772,9 +787,9 @@ export class RoomRelay extends DurableObject<Env> {
         state.status = 'draw';
         state.winner = 'draw';
         state.draw_offer_by = null;
+        this.broadcastToAll(this.formatChessSyncPayload(state));
         this.saveChessState(state);
         this.persistCompletedGameIfNeeded(state, meta?.gameId);
-        this.broadcastToAll(this.formatChessSyncPayload(state));
         return;
       }
 
@@ -797,8 +812,11 @@ export class RoomRelay extends DurableObject<Env> {
         state.move_count = 0;
         state.round_num += 1;
         state.created_at = new Date().toISOString();
-        this.saveChessState(state);
+        this.cachedChess = null;
+        this.cachedFen = '';
+        this.cachedRound = state.round_num;
         this.broadcastToAll(this.formatChessSyncPayload(state));
+        this.saveChessState(state);
         return;
       }
       return;

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Chess, PieceSymbol, Square } from 'chess.js';
+import { Chess, Move, PieceSymbol, Square } from 'chess.js';
 import confetti from 'canvas-confetti';
 import {
   ArrowUpDown,
@@ -111,12 +111,13 @@ interface DragSession {
   piece: { type: PieceSymbol; color: 'w' | 'b' };
   startX: number;
   startY: number;
+  isTouch: boolean;
 }
 
 interface DragVisual {
   active: boolean;
-  clientX: number;
-  clientY: number;
+  initX: number;
+  initY: number;
   hoverSq: Square | null;
 }
 
@@ -125,6 +126,46 @@ const RANKS_WHITE = ['8', '7', '6', '5', '4', '3', '2', '1'] as const;
 const RANKS_BLACK = ['1', '2', '3', '4', '5', '6', '7', '8'] as const;
 const FILES_BLACK = ['h', 'g', 'f', 'e', 'd', 'c', 'b', 'a'] as const;
 const QUICK_EMOJIS = ['♟️', '👑', '⚡', '🔥', '🎧', '🦊'];
+
+function advanceChessGameState(
+  prev: ChessGameState,
+  game: Chess,
+  mv: Move,
+  now: number
+): ChessGameState {
+  let nextW = prev.whiteTimeMs;
+  let nextB = prev.blackTimeMs;
+  if (prev.lastMoveAt && prev.moveCount > 0) {
+    const elapsed = Math.max(0, now - prev.lastMoveAt);
+    if (prev.turn === 'w') nextW = Math.max(0, nextW - elapsed);
+    else nextB = Math.max(0, nextB - elapsed);
+  }
+
+  let status: ChessGameState['status'] = 'active';
+  let winner: ChessGameState['winner'] = null;
+  if (game.isCheckmate()) {
+    status = 'checkmate';
+    winner = mv.color;
+  } else if (game.isDraw()) {
+    status = 'draw';
+    winner = 'draw';
+  }
+
+  return {
+    ...prev,
+    fen: game.fen(),
+    pgn: game.pgn(),
+    turn: game.turn(),
+    status,
+    winner,
+    whiteTimeMs: nextW,
+    blackTimeMs: nextB,
+    lastMoveAt: now,
+    lastMove: { from: mv.from, to: mv.to, san: mv.san },
+    drawOfferBy: null,
+    moveCount: prev.moveCount + 1,
+  };
+}
 
 const PieceIcon: React.FC<{
   type: PieceSymbol;
@@ -150,6 +191,30 @@ const PieceIcon: React.FC<{
       </g>
     </svg>
   );
+};
+
+const ChessClockBadge: React.FC<{
+  baseTimeMs: number;
+  running: boolean;
+  lastMoveAt: number | null;
+  className: string;
+}> = ({ baseTimeMs, running, lastMoveAt, className }) => {
+  const [tickNow, setTickNow] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    if (!running || !lastMoveAt) return;
+    const id = window.setInterval(() => {
+      setTickNow(Date.now());
+    }, 250);
+    return () => window.clearInterval(id);
+  }, [running, lastMoveAt]);
+
+  const displayMs =
+    running && lastMoveAt
+      ? Math.max(0, baseTimeMs - Math.max(0, tickNow - lastMoveAt))
+      : baseTimeMs;
+
+  return <div className={className}>{formatChessClock(displayMs)}</div>;
 };
 
 function createInitialGameState(
@@ -235,7 +300,6 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
   const [dragVisual, setDragVisual] = useState<DragVisual | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
   const [friendReqSentIds, setFriendReqSentIds] = useState<Record<string, boolean>>({});
-  const [clockNow, setClockNow] = useState<number>(() => Date.now());
   const [showGameOverModal, setShowGameOverModal] = useState(true);
   const [reviewTarget, setReviewTarget] = useState<{
     pgn: string;
@@ -268,6 +332,8 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
   const [floatingEmojis, setFloatingEmojis] = useState<{ id: string; emoji: string; x: number }[]>([]);
 
   const boardContainerRef = useRef<HTMLDivElement | null>(null);
+  const floatingDragElRef = useRef<HTMLDivElement | null>(null);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
   const meshRef = useRef<WebRTCMeshRoom | null>(null);
   const localAudioStreamRef = useRef<MediaStream | null>(null);
   const localCamStreamRef = useRef<MediaStream | null>(null);
@@ -575,11 +641,45 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
           onTopicChange: () => {},
           onRawMessage: (raw) => {
             if (cancelled) return;
+            // Fast direct P2P WebRTC DataChannel move packet (~20ms LAN/4G latency!)
+            if (raw.type === 'chess_p2p_move') {
+              const prev = chessStateRef.current;
+              const p2pCount = typeof raw.moveCount === 'number' ? raw.moveCount : 0;
+              if (
+                prev.status === 'active' &&
+                p2pCount > prev.moveCount &&
+                raw.color !== myColorRef.current &&
+                typeof raw.from === 'string' &&
+                typeof raw.to === 'string'
+              ) {
+                const game = loadChessGame(prev.fen, prev.pgn);
+                const promo =
+                  raw.promotion === 'q' ||
+                  raw.promotion === 'r' ||
+                  raw.promotion === 'b' ||
+                  raw.promotion === 'n'
+                    ? raw.promotion
+                    : 'q';
+                try {
+                  const mv = game.move({ from: raw.from, to: raw.to, promotion: promo });
+                  if (mv) {
+                    const nextState = advanceChessGameState(prev, game, mv, Date.now());
+                    chessStateRef.current = nextState;
+                    setChessState(nextState);
+                    playMoveAudio(mv, game.inCheck(), false);
+                  }
+                } catch {
+                  // Authoritative DO chess_sync reconciles cleanly
+                }
+              }
+              return;
+            }
+
             if (raw.type === 'chess_sync' && raw.state) {
               const incoming = raw.state as ChessGameState;
               const prev = chessStateRef.current;
 
-              // Opponent just made a real-time move: play exact Chess.com opponent sound!
+              // Opponent move sound plays only if not already applied by fast P2P DataChannel
               if (
                 incoming.moveCount > prev.moveCount &&
                 incoming.turn === myColorRef.current &&
@@ -599,6 +699,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                 incoming.status !== 'active' ||
                 prev.status === 'waiting';
               if (isResetOrGameOver || incoming.moveCount >= prev.moveCount) {
+                chessStateRef.current = incoming;
                 setChessState(incoming);
               }
 
@@ -711,48 +812,45 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
     };
   }, [viewMode, currentUser, selectedTimeMs]);
 
-  // Smooth clock tick
+  // Single expiry timeout per turn (avoids 5Hz full-board re-renders on mobile CPU!)
   useEffect(() => {
-    if (viewMode !== 'game' || chessState.status !== 'active' || chessState.moveCount === 0) {
+    if (
+      viewMode !== 'game' ||
+      chessState.status !== 'active' ||
+      chessState.moveCount === 0 ||
+      !chessState.lastMoveAt
+    ) {
       return;
     }
 
-    const interval = window.setInterval(() => {
-      const now = Date.now();
-      setClockNow(now);
+    const baseRemaining =
+      chessState.turn === 'w' ? chessState.whiteTimeMs : chessState.blackTimeMs;
+    const elapsed = Math.max(0, Date.now() - chessState.lastMoveAt);
+    const delayMs = Math.max(0, baseRemaining - elapsed);
 
-      if (chessState.lastMoveAt) {
-        const elapsed = Math.max(0, now - chessState.lastMoveAt);
-        const remaining =
-          chessState.turn === 'w'
-            ? chessState.whiteTimeMs - elapsed
-            : chessState.blackTimeMs - elapsed;
-
-        if (remaining <= 0) {
-          if (gameMode === 'online' && meshRef.current && wsConnected) {
-            meshRef.current.sendCustomJson({
-              type: 'chess_timeout',
-              color: chessState.turn,
-            });
-          } else {
-            const loser = chessState.turn;
-            setChessState((prev) =>
-              prev.status === 'active'
-                ? {
-                    ...prev,
-                    status: 'timeout',
-                    winner: loser === 'w' ? 'b' : 'w',
-                    whiteTimeMs: loser === 'w' ? 0 : prev.whiteTimeMs,
-                    blackTimeMs: loser === 'b' ? 0 : prev.blackTimeMs,
-                  }
-                : prev
-            );
-          }
-        }
+    const timer = window.setTimeout(() => {
+      if (gameMode === 'online' && meshRef.current && wsConnected) {
+        meshRef.current.sendCustomJson({
+          type: 'chess_timeout',
+          color: chessState.turn,
+        });
+      } else {
+        const loser = chessState.turn;
+        setChessState((prev) =>
+          prev.status === 'active'
+            ? {
+                ...prev,
+                status: 'timeout',
+                winner: loser === 'w' ? 'b' : 'w',
+                whiteTimeMs: loser === 'w' ? 0 : prev.whiteTimeMs,
+                blackTimeMs: loser === 'b' ? 0 : prev.blackTimeMs,
+              }
+            : prev
+        );
       }
-    }, 200);
+    }, delayMs);
 
-    return () => window.clearInterval(interval);
+    return () => window.clearTimeout(timer);
   }, [
     viewMode,
     chessState.status,
@@ -869,39 +967,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
           return prev;
         }
         if (!mv) return prev;
-
-        let nextW = prev.whiteTimeMs;
-        let nextB = prev.blackTimeMs;
-        if (prev.lastMoveAt && prev.moveCount > 0) {
-          const elapsed = Math.max(0, now - prev.lastMoveAt);
-          if (prev.turn === 'w') nextW = Math.max(0, nextW - elapsed);
-          else nextB = Math.max(0, nextB - elapsed);
-        }
-
-        let status: ChessGameState['status'] = 'active';
-        let winner: ChessGameState['winner'] = null;
-        if (game.isCheckmate()) {
-          status = 'checkmate';
-          winner = mv.color;
-        } else if (game.isDraw()) {
-          status = 'draw';
-          winner = 'draw';
-        }
-
-        return {
-          ...prev,
-          fen: game.fen(),
-          pgn: game.pgn(),
-          turn: game.turn(),
-          status,
-          winner,
-          whiteTimeMs: nextW,
-          blackTimeMs: nextB,
-          lastMoveAt: now,
-          lastMove: { from: mv.from, to: mv.to, san: mv.san },
-          drawOfferBy: null,
-          moveCount: prev.moveCount + 1,
-        };
+        return advanceChessGameState(prev, game, mv, now);
       });
     },
     []
@@ -966,16 +1032,28 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
       setSelectedSquare(null);
       setPendingPromotion(null);
 
-      // 1) Play sound outside state updater (StrictMode-safe) & run 0ms local optimistic execution
+      const nextState = advanceChessGameState(chessStateRef.current, testGame, valid, Date.now());
+      const nextCount = nextState.moveCount;
+      chessStateRef.current = nextState;
+
+      // 1) Play sound outside state updater & run 0ms local optimistic execution
       playMoveAudio(valid, testGame.inCheck(), true);
       applyLocalMove(from, to, promotion);
 
-      // 2) Send move over Durable Object WebSocket asynchronously
-      if (gameMode === 'online' && meshRef.current && wsConnected) {
+      // 2) Send BOTH instant P2P WebRTC DataChannel packet (~20ms) + authoritative DO WebSocket
+      if (gameMode === 'online' && meshRef.current) {
+        meshRef.current.sendFastPeerData({
+          type: 'chess_p2p_move',
+          from,
+          to,
+          promotion,
+          moveCount: nextCount,
+          color: myColorRef.current,
+        });
         meshRef.current.sendCustomJson({ type: 'chess_move', from, to, promotion });
       }
     },
-    [viewMode, showcaseFen, applyLocalMove, gameMode, wsConnected]
+    [viewMode, showcaseFen, applyLocalMove, gameMode]
   );
 
   const attemptMoveOrPromo = useCallback(
@@ -1053,18 +1131,108 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
       if (viewMode === 'lobby') setShowcaseSelected(sq);
       else setSelectedSquare(sq);
 
+      // Compute legal targets synchronously at 0ms so ultra-fast mobile bullet flicks (<16ms) never miss
+      const localLegal = new Set<string>();
+      try {
+        for (const m of activeBoardChess.moves({ square: sq, verbose: true })) {
+          localLegal.add(m.to);
+        }
+      } catch {
+        // Ignore
+      }
+
+      const isTouch = e.pointerType === 'touch';
+      const touchOffsetY = isTouch ? 24 : 0;
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const dragPiece = { type: piece.type, color: piece.color };
+
+      dragCleanupRef.current?.();
       setDragSession({
         from: sq,
-        piece: { type: piece.type, color: piece.color },
-        startX: e.clientX,
-        startY: e.clientY,
+        piece: dragPiece,
+        startX,
+        startY,
+        isTouch,
       });
       setDragVisual({
         active: false,
-        clientX: e.clientX,
-        clientY: e.clientY,
+        initX: startX,
+        initY: startY - touchOffsetY,
         hoverSq: sq,
       });
+
+      let wasActivated = false;
+      let lastHoverSq: Square | null = sq;
+      let latestX = startX;
+      let latestY = startY;
+      let rafId = 0;
+
+      const applyTransform = () => {
+        rafId = 0;
+        const el = floatingDragElRef.current;
+        if (el) {
+          el.style.transform = `translate3d(${latestX}px, ${latestY - touchOffsetY}px, 0) translate(-50%, -50%) scale(1.2)`;
+        }
+      };
+
+      const handleMove = (ev: PointerEvent) => {
+        latestX = ev.clientX;
+        latestY = ev.clientY;
+        const dist = Math.hypot(latestX - startX, latestY - startY);
+
+        if (!wasActivated && dist >= 4) {
+          wasActivated = true;
+          const firstHover = getSquareFromPoint(latestX, latestY);
+          lastHoverSq = firstHover;
+          setDragVisual({
+            active: true,
+            initX: latestX,
+            initY: latestY - touchOffsetY,
+            hoverSq: firstHover,
+          });
+          return;
+        }
+
+        if (wasActivated) {
+          if (!rafId) {
+            rafId = window.requestAnimationFrame(applyTransform);
+          }
+          const nextHover = getSquareFromPoint(latestX, latestY);
+          if (nextHover !== lastHoverSq) {
+            lastHoverSq = nextHover;
+            setDragVisual((prev) => (prev ? { ...prev, hoverSq: nextHover } : null));
+          }
+        }
+      };
+
+      const cleanupListeners = () => {
+        if (rafId) {
+          window.cancelAnimationFrame(rafId);
+          rafId = 0;
+        }
+        window.removeEventListener('pointermove', handleMove);
+        window.removeEventListener('pointerup', handleUp);
+        window.removeEventListener('pointercancel', handleUp);
+        dragCleanupRef.current = null;
+      };
+
+      const handleUp = (ev: PointerEvent) => {
+        cleanupListeners();
+        const dist = Math.hypot(ev.clientX - startX, ev.clientY - startY);
+        const didDrag = wasActivated || dist >= 4;
+        const targetSq = getSquareFromPoint(ev.clientX, ev.clientY);
+        if (didDrag && targetSq && targetSq !== sq && localLegal.has(targetSq)) {
+          attemptMoveOrPromo(sq, targetSq);
+        }
+        setDragSession(null);
+        setDragVisual(null);
+      };
+
+      dragCleanupRef.current = cleanupListeners;
+      window.addEventListener('pointermove', handleMove, { passive: true });
+      window.addEventListener('pointerup', handleUp);
+      window.addEventListener('pointercancel', handleUp);
       return;
     }
 
@@ -1073,62 +1241,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
     else setSelectedSquare(null);
   };
 
-  const legalDestinationsRef = useRef(legalDestinations);
-  const getSquareFromPointRef = useRef(getSquareFromPoint);
-  const attemptMoveOrPromoRef = useRef(attemptMoveOrPromo);
-
-  useEffect(() => {
-    legalDestinationsRef.current = legalDestinations;
-  }, [legalDestinations]);
-
-  useEffect(() => {
-    getSquareFromPointRef.current = getSquareFromPoint;
-  }, [getSquareFromPoint]);
-
-  useEffect(() => {
-    attemptMoveOrPromoRef.current = attemptMoveOrPromo;
-  }, [attemptMoveOrPromo]);
-
-  // Global window pointer tracking (binds strictly once per pointerdown session)
-  useEffect(() => {
-    if (!dragSession) return;
-
-    let wasActivated = false;
-
-    const handleMove = (e: PointerEvent) => {
-      const dist = Math.hypot(e.clientX - dragSession.startX, e.clientY - dragSession.startY);
-      if (dist >= 6) wasActivated = true;
-      const hoverSq = wasActivated ? getSquareFromPointRef.current(e.clientX, e.clientY) : dragSession.from;
-      setDragVisual({
-        active: wasActivated,
-        clientX: e.clientX,
-        clientY: e.clientY,
-        hoverSq,
-      });
-    };
-
-    const handleUp = (e: PointerEvent) => {
-      const dist = Math.hypot(e.clientX - dragSession.startX, e.clientY - dragSession.startY);
-      const didDrag = wasActivated || dist >= 6;
-      const targetSq = getSquareFromPointRef.current(e.clientX, e.clientY);
-      if (didDrag && targetSq && targetSq !== dragSession.from) {
-        if (legalDestinationsRef.current.has(targetSq)) {
-          attemptMoveOrPromoRef.current(dragSession.from, targetSq);
-        }
-      }
-      setDragSession(null);
-      setDragVisual(null);
-    };
-
-    window.addEventListener('pointermove', handleMove, { passive: true });
-    window.addEventListener('pointerup', handleUp);
-    window.addEventListener('pointercancel', handleUp);
-    return () => {
-      window.removeEventListener('pointermove', handleMove);
-      window.removeEventListener('pointerup', handleUp);
-      window.removeEventListener('pointercancel', handleUp);
-    };
-  }, [dragSession]);
+  useEffect(() => () => dragCleanupRef.current?.(), []);
 
   // Instant Profile Creation on First Screen (Name + Unique @username)
   const ensureProfileAndLaunch = async (launchAfter: PendingLaunch) => {
@@ -1313,6 +1426,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
 
   const handleLeaveGame = () => {
     playUiSound('click');
+    dragCleanupRef.current?.();
     stopAllMediaAndSocket();
     setActiveGameId(null);
     setSelectedSquare(null);
@@ -1591,12 +1705,13 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
               </div>
             </div>
 
-            {/* Interactive Showcase Board (Supports Smooth Drag & Drop + Tap!) */}
+            {/* Interactive Showcase Board (Supports 120fps Drag & Drop + Instant Tap!) */}
             <div
               ref={boardContainerRef}
-              className="relative w-full max-w-[440px] mx-auto aspect-square rounded-2xl overflow-hidden border-2 border-cyan-400/50 shadow-neo select-none touch-none"
+              onContextMenu={(e) => e.preventDefault()}
+              className="relative w-full max-w-[440px] mx-auto aspect-square rounded-2xl overflow-hidden border-2 border-cyan-400/50 shadow-neo overscroll-none touch-none select-none"
             >
-              <div className="grid grid-cols-8 grid-rows-8 w-full h-full">
+              <div className="grid grid-cols-8 grid-rows-8 w-full h-full touch-none select-none">
                 {RANKS_WHITE.map((rank, rIdx) =>
                   FILES.map((file, fIdx) => {
                     const sq = `${file}${rank}` as Square;
@@ -1618,14 +1733,15 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                         key={sq}
                         type="button"
                         onPointerDown={(e) => handleSquarePointerDown(e, sq)}
+                        onContextMenu={(e) => e.preventDefault()}
                         aria-label={`Board ${sq}`}
                         className={`relative flex items-center justify-center ${bgClass} ${
                           isDragHover ? 'ring-4 ring-inset ring-white' : ''
-                        } focus:outline-none touch-none`}
+                        } focus:outline-none touch-none select-none`}
                       >
                         {fIdx === 0 && (
                           <span
-                            className={`absolute top-0.5 left-1 text-[9px] font-mono font-bold ${
+                            className={`absolute top-0.5 left-1 text-[9px] font-mono font-bold pointer-events-none select-none ${
                               isLight ? 'text-slate-700/70' : 'text-white/70'
                             }`}
                           >
@@ -1634,7 +1750,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                         )}
                         {rIdx === 7 && (
                           <span
-                            className={`absolute bottom-0.5 right-1 text-[9px] font-mono font-bold ${
+                            className={`absolute bottom-0.5 right-1 text-[9px] font-mono font-bold pointer-events-none select-none ${
                               isLight ? 'text-slate-700/70' : 'text-white/70'
                             }`}
                           >
@@ -1642,7 +1758,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                           </span>
                         )}
                         {piece && (
-                          <span className={`w-full h-full flex items-center justify-center ${isDragSource ? 'opacity-25' : ''}`}>
+                          <span className={`w-full h-full flex items-center justify-center pointer-events-none ${isDragSource ? 'opacity-20' : ''}`}>
                             <PieceIcon type={piece.type} color={piece.color} />
                           </span>
                         )}
@@ -1932,11 +2048,16 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
           </div>
         </div>
 
-        {/* Floating Piece Under Cursor/Finger During Showcase Drag */}
+        {/* Floating Piece Under Cursor/Finger During Showcase Drag (120fps direct DOM transform) */}
         {dragSession && dragVisual?.active && (
           <div
-            style={{ left: dragVisual.clientX, top: dragVisual.clientY }}
-            className="fixed z-50 -translate-x-1/2 -translate-y-1/2 w-12 h-12 sm:w-14 sm:h-14 pointer-events-none flex items-center justify-center scale-[1.15]"
+            ref={floatingDragElRef}
+            style={{
+              left: 0,
+              top: 0,
+              transform: `translate3d(${dragVisual.initX}px, ${dragVisual.initY}px, 0) translate(-50%, -50%) scale(1.2)`,
+            }}
+            className="fixed z-50 w-14 h-14 sm:w-16 sm:h-16 pointer-events-none flex items-center justify-center will-change-transform drop-shadow-[0_12px_16px_rgba(0,0,0,0.65)]"
           >
             <PieceIcon type={dragSession.piece.type} color={dragSession.piece.color} />
           </div>
@@ -2022,17 +2143,9 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
   const myPlayer = myColor === 'w' ? chessState.white : chessState.black;
   const oppPlayer = oppColor === 'w' ? chessState.white : chessState.black;
 
-  const liveWhiteMs =
-    chessState.status === 'active' && chessState.moveCount > 0 && chessState.turn === 'w' && chessState.lastMoveAt
-      ? Math.max(0, chessState.whiteTimeMs - Math.max(0, clockNow - chessState.lastMoveAt))
-      : chessState.whiteTimeMs;
-  const liveBlackMs =
-    chessState.status === 'active' && chessState.moveCount > 0 && chessState.turn === 'b' && chessState.lastMoveAt
-      ? Math.max(0, chessState.blackTimeMs - Math.max(0, clockNow - chessState.lastMoveAt))
-      : chessState.blackTimeMs;
-
-  const myClockMs = myColor === 'w' ? liveWhiteMs : liveBlackMs;
-  const oppClockMs = oppColor === 'w' ? liveWhiteMs : liveBlackMs;
+  const myBaseClockMs = myColor === 'w' ? chessState.whiteTimeMs : chessState.blackTimeMs;
+  const oppBaseClockMs = oppColor === 'w' ? chessState.whiteTimeMs : chessState.blackTimeMs;
+  const clocksTicking = chessState.status === 'active' && chessState.moveCount > 0;
 
   const displayRanks = boardOrientation === 'w' ? RANKS_WHITE : RANKS_BLACK;
   const displayFiles = boardOrientation === 'w' ? FILES : FILES_BLACK;
@@ -2066,7 +2179,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
   return (
     <div
       data-testid="chess-fullscreen-stage"
-      className="fixed inset-0 z-50 h-[100dvh] w-screen overflow-hidden bg-[#070709] text-white flex flex-col justify-between select-none"
+      className="fixed inset-0 z-50 h-[100dvh] w-screen overflow-hidden overscroll-none touch-none bg-[#070709] text-white flex flex-col justify-between select-none"
     >
       {/* Floating Emoji Reaction Layer */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden z-40">
@@ -2256,24 +2369,26 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
         </div>
 
         {/* Your Clock */}
-        <div
+        <ChessClockBadge
+          baseTimeMs={myBaseClockMs}
+          running={clocksTicking && isMyTurn}
+          lastMoveAt={chessState.lastMoveAt}
           className={`px-2.5 sm:px-3.5 py-1.5 rounded-xl font-mono text-sm sm:text-base font-black border flex-shrink-0 ${
             chessState.status === 'active' && isMyTurn
               ? 'bg-[#CCFF00] text-black border-[#CCFF00]'
               : 'bg-[#111116] text-white/80 border-white/15'
           }`}
-        >
-          {formatChessClock(myClockMs)}
-        </div>
+        />
       </div>
 
       {/* 3) Middle Auto-Fitted 8x8 Chessboard (Zero Scroll on EVERY screen!) */}
-      <div className="flex-1 min-h-0 flex items-center justify-center p-1 sm:p-2 overflow-hidden">
+      <div className="flex-1 min-h-0 flex items-center justify-center p-1 sm:p-1.5 overflow-hidden overscroll-none touch-none">
         <div
           ref={boardContainerRef}
-          className="relative w-[min(95vw,calc(100dvh-208px))] sm:w-[min(84vw,calc(100dvh-222px))] lg:w-[min(560px,calc(100dvh-224px))] aspect-square rounded-2xl overflow-hidden border-2 border-white/25 shadow-neo touch-none select-none"
+          onContextMenu={(e) => e.preventDefault()}
+          className="relative w-[min(95vw,calc(100dvh-282px))] sm:w-[min(82vw,calc(100dvh-258px))] lg:w-[min(540px,calc(100dvh-260px))] aspect-square rounded-2xl overflow-hidden border-2 border-white/25 shadow-neo overscroll-none touch-none select-none"
         >
-          <div className="grid grid-cols-8 grid-rows-8 w-full h-full">
+          <div className="grid grid-cols-8 grid-rows-8 w-full h-full touch-none select-none">
             {displayRanks.map((rank, rIdx) =>
               displayFiles.map((file, fIdx) => {
                 const sq = `${file}${rank}` as Square;
@@ -2301,14 +2416,15 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                     key={sq}
                     type="button"
                     onPointerDown={(e) => handleSquarePointerDown(e, sq)}
+                    onContextMenu={(e) => e.preventDefault()}
                     aria-label={`Square ${sq}`}
                     className={`relative flex items-center justify-center ${bgClass} ${
                       isDragHover ? 'ring-4 ring-inset ring-white' : ''
-                    } focus:outline-none touch-none`}
+                    } focus:outline-none touch-none select-none`}
                   >
                     {fIdx === 0 && (
                       <span
-                        className={`absolute top-0.5 left-1 text-[8px] sm:text-[9px] font-mono font-bold ${
+                        className={`absolute top-0.5 left-1 text-[8px] sm:text-[9px] font-mono font-bold pointer-events-none select-none ${
                           isLight ? 'text-slate-700/70' : 'text-white/70'
                         }`}
                       >
@@ -2317,7 +2433,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                     )}
                     {rIdx === 7 && (
                       <span
-                        className={`absolute bottom-0.5 right-1 text-[8px] sm:text-[9px] font-mono font-bold ${
+                        className={`absolute bottom-0.5 right-1 text-[8px] sm:text-[9px] font-mono font-bold pointer-events-none select-none ${
                           isLight ? 'text-slate-700/70' : 'text-white/70'
                         }`}
                       >
@@ -2325,7 +2441,7 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
                       </span>
                     )}
                     {piece && (
-                      <span className={`w-full h-full flex items-center justify-center ${isDragSource ? 'opacity-25' : ''}`}>
+                      <span className={`w-full h-full flex items-center justify-center pointer-events-none ${isDragSource ? 'opacity-20' : ''}`}>
                         <PieceIcon type={piece.type} color={piece.color} />
                       </span>
                     )}
@@ -2441,13 +2557,14 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
         </div>
       </div>
 
-      {/* 4) Bottom Strip: Opponent Video Call Feed + Name + Blue Tick + Clock */}
-      <div className="px-2.5 sm:px-5 py-1.5 sm:py-2 bg-[#111116] border-t border-white/10 flex items-center justify-between gap-2.5 flex-shrink-0">
-        <div className="flex items-center gap-2.5 min-w-0">
-          {/* Larger Opponent Live Camera Card */}
+      {/* 4) Bottom Strip: LARGE Clear Opponent Video Face View + Profile + Clock */}
+      <div className="px-2.5 sm:px-5 py-2 bg-[#111116] border-t border-white/10 flex items-center justify-between gap-2.5 sm:gap-4 flex-shrink-0">
+        <div className="flex items-stretch gap-2.5 sm:gap-3.5 min-w-0 flex-1">
+          {/* Large Opponent Live Camera Window (4x bigger face view on phone!) */}
           <div
-            className={`relative w-20 h-14 sm:w-28 sm:h-20 rounded-xl bg-[#070709] border-2 overflow-hidden flex items-center justify-center flex-shrink-0 ${
-              isRemoteSpeaking ? 'border-[#CCFF00] shadow-glow-lime' : 'border-cyan-400/35'
+            data-testid="opponent-video-card"
+            className={`relative w-[46vw] max-w-[205px] h-28 sm:w-44 sm:h-28 lg:w-52 lg:h-32 rounded-2xl bg-[#070709] border-2 overflow-hidden flex items-center justify-center flex-shrink-0 ${
+              isRemoteSpeaking ? 'border-[#CCFF00] shadow-glow-lime' : 'border-cyan-400/45'
             }`}
           >
             <video
@@ -2458,92 +2575,102 @@ export const ChessArena: React.FC<ChessArenaProps> = ({
               className={`w-full h-full object-cover ${isRemoteCameraOn ? 'block' : 'hidden'}`}
             />
             {!isRemoteCameraOn && (
-              <div className="flex flex-col items-center gap-0.5 text-center p-1">
-                <span className="text-xl sm:text-2xl">
+              <div className="flex flex-col items-center gap-1 text-center p-2">
+                <span className="text-3xl sm:text-4xl">
                   {oppPlayer?.avatar?.emoji || '♟️'}
                 </span>
-                <span className="text-[9px] font-mono text-white/50 truncate max-w-full">
-                  {gameMode === 'bot' ? 'AI' : remoteConnected ? 'Cam Off' : 'Waiting'}
+                <span className="text-[10px] font-mono text-white/55 truncate max-w-full">
+                  {gameMode === 'bot' ? 'Tara Bot' : remoteConnected ? 'Camera Off' : 'Connecting...'}
                 </span>
               </div>
             )}
-            <span className="absolute bottom-0.5 left-1 px-1 rounded bg-black/75 text-[9px] font-mono text-white/85">
+            <span className="absolute bottom-1 left-1.5 px-1.5 py-0.5 rounded-md bg-black/75 text-[10px] font-mono text-white/90">
               {isRemoteMuted ? '🔇' : '🎙️'}
             </span>
           </div>
 
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5">
-              <span className="font-heading font-black text-xs sm:text-base text-white truncate">
-                {oppPlayer?.alias || 'Waiting Opponent'}
-              </span>
-              {oppPlayer?.id && !oppPlayer.id.startsWith('bot-') && (
-                <OnlineBlueTick isOnline={oppIsOnline} size="xs" />
-              )}
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/10 text-white/75">
-                {oppColor === 'w' ? 'W' : 'B'}
-              </span>
-              {canAddOppFriend && (
+          <div className="min-w-0 flex-1 flex flex-col justify-between gap-1 py-0.5">
+            <div>
+              <div className="flex items-center gap-1 flex-wrap">
+                <span className="font-heading font-black text-sm sm:text-base text-white truncate max-w-[140px] sm:max-w-none">
+                  {oppPlayer?.alias || 'Waiting Opponent'}
+                </span>
+                {oppPlayer?.id && !oppPlayer.id.startsWith('bot-') && (
+                  <OnlineBlueTick isOnline={oppIsOnline} size="xs" />
+                )}
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/10 text-white/75">
+                  {oppColor === 'w' ? 'W' : 'B'}
+                </span>
+                {canAddOppFriend && (
+                  <button
+                    type="button"
+                    onClick={() => void handleAddOpponentAsFriend()}
+                    className="px-2 py-0.5 rounded bg-[#1D9BF0]/20 border border-[#1D9BF0]/40 text-[#38BDF8] text-[10px] font-mono flex items-center gap-1"
+                  >
+                    <UserPlus className="w-3 h-3" />
+                    <span>Add</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] sm:text-xs font-mono text-white/55 mt-0.5">
+                {oppPlayer?.username && (
+                  <span className="text-cyan-300 truncate">@{oppPlayer.username}</span>
+                )}
+                <span className="truncate">
+                  {(oppColor === 'w' ? material.capturedByWhite : material.capturedByBlack).length > 0
+                    ? (oppColor === 'w' ? material.capturedByWhite : material.capturedByBlack)
+                        .map((p) => p.toUpperCase())
+                        .join(' ')
+                    : 'No captures'}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              {/* Opponent Clock */}
+              <ChessClockBadge
+                baseTimeMs={oppBaseClockMs}
+                running={clocksTicking && !isMyTurn}
+                lastMoveAt={chessState.lastMoveAt}
+                className={`px-3 sm:px-4 py-1.5 rounded-xl font-mono text-base sm:text-lg font-black border flex-shrink-0 ${
+                  chessState.status === 'active' && chessState.turn === oppColor
+                    ? 'bg-[#CCFF00] text-black border-[#CCFF00]'
+                    : 'bg-[#070709] text-white/85 border-white/15'
+                }`}
+              />
+
+              {isGameOver && !showGameOverModal && chessState.pgn && (
                 <button
                   type="button"
-                  onClick={() => void handleAddOpponentAsFriend()}
-                  className="px-2 py-0.5 rounded bg-[#1D9BF0]/20 border border-[#1D9BF0]/40 text-[#38BDF8] text-[10px] font-mono flex items-center gap-1"
+                  onClick={() =>
+                    setReviewTarget({
+                      pgn: chessState.pgn,
+                      whiteAlias: chessState.white?.alias || 'White',
+                      blackAlias: chessState.black?.alias || 'Black',
+                      orientation: myColor,
+                    })
+                  }
+                  className="px-2.5 py-1 rounded-lg bg-violet-500/25 border border-violet-400/50 text-[11px] font-mono text-violet-200 font-bold"
                 >
-                  <UserPlus className="w-3 h-3" />
-                  <span>Add</span>
+                  📊 Game Review
                 </button>
               )}
             </div>
-
-            <div className="flex items-center gap-2 text-[10px] sm:text-xs font-mono text-white/55">
-              {oppPlayer?.username && (
-                <span className="text-cyan-300 truncate">@{oppPlayer.username}</span>
-              )}
-              <span className="truncate">
-                {(oppColor === 'w' ? material.capturedByWhite : material.capturedByBlack).length > 0
-                  ? (oppColor === 'w' ? material.capturedByWhite : material.capturedByBlack)
-                      .map((p) => p.toUpperCase())
-                      .join(' ')
-                  : 'No captures'}
-              </span>
-            </div>
-
-            {isGameOver && !showGameOverModal && chessState.pgn && (
-              <button
-                type="button"
-                onClick={() =>
-                  setReviewTarget({
-                    pgn: chessState.pgn,
-                    whiteAlias: chessState.white?.alias || 'White',
-                    blackAlias: chessState.black?.alias || 'Black',
-                    orientation: myColor,
-                  })
-                }
-                className="mt-1 px-2 py-0.5 rounded bg-violet-500/25 border border-violet-400/50 text-[10px] font-mono text-violet-200 font-bold"
-              >
-                📊 Game Review
-              </button>
-            )}
           </div>
-        </div>
-
-        {/* Opponent Clock */}
-        <div
-          className={`px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl font-mono text-sm sm:text-lg font-black border flex-shrink-0 ${
-            chessState.status === 'active' && chessState.turn === oppColor
-              ? 'bg-[#CCFF00] text-black border-[#CCFF00]'
-              : 'bg-[#070709] text-white/80 border-white/15'
-          }`}
-        >
-          {formatChessClock(oppClockMs)}
         </div>
       </div>
 
-      {/* Floating Piece Overlay Under Active Pointer Drag */}
+      {/* Floating Piece Overlay Under Active Pointer Drag (120fps direct DOM transform) */}
       {dragSession && dragVisual?.active && (
         <div
-          style={{ left: dragVisual.clientX, top: dragVisual.clientY }}
-          className="fixed z-[70] -translate-x-1/2 -translate-y-1/2 w-12 h-12 sm:w-16 sm:h-16 pointer-events-none flex items-center justify-center scale-[1.15]"
+          ref={floatingDragElRef}
+          style={{
+            left: 0,
+            top: 0,
+            transform: `translate3d(${dragVisual.initX}px, ${dragVisual.initY}px, 0) translate(-50%, -50%) scale(1.2)`,
+          }}
+          className="fixed z-[70] w-16 h-16 sm:w-20 sm:h-20 pointer-events-none flex items-center justify-center will-change-transform drop-shadow-[0_12px_16px_rgba(0,0,0,0.65)]"
         >
           <PieceIcon type={dragSession.piece.type} color={dragSession.piece.color} />
         </div>

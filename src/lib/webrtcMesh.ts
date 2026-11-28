@@ -1,4 +1,4 @@
-import Peer, { MediaConnection } from 'peerjs';
+import Peer, { DataConnection, MediaConnection } from 'peerjs';
 import { supabase, isSupabaseConfigured } from './supabase';
 import { buildWsUrl } from './backendConfig';
 import { DjSoundType, RoomChatMessage, RoomParticipant, UserAvatar } from '../types';
@@ -128,6 +128,7 @@ export class WebRTCMeshRoom {
   private peer: Peer | null = null;
   public myPeerId = '';
   private activeCalls: Map<string, MediaConnection> = new Map();
+  private dataConns: Map<string, DataConnection> = new Map();
   private remoteAudioElements: Map<string, HTMLAudioElement> = new Map();
   private remoteSpeakerVolume = 1;
   private remoteSpeakerMuted = false;
@@ -190,6 +191,50 @@ export class WebRTCMeshRoom {
     const cleanId = this.userId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 10);
     const candidateId = `fc_${cleanId}_${Math.random().toString(36).substring(2, 6)}`;
 
+    const attachPeer = (peerInst: Peer, resolve: (id: string) => void, isFallback = false) => {
+      peerInst.on('open', (id) => {
+        if (this.isDestroyed) {
+          peerInst.destroy();
+          resolve(id);
+          return;
+        }
+        this.myPeerId = id;
+        this.initSignaling();
+        resolve(id);
+      });
+
+      peerInst.on('connection', (conn) => {
+        this.setupDataConnection(conn);
+      });
+
+      peerInst.on('call', (call) => {
+        if (!this.localStream || this.isDestroyed) return;
+        call.answer(this.localStream, { sdpTransform: optimizeAudioSdp });
+        this.setupCall(call);
+      });
+
+      if (!isFallback) {
+        peerInst.on('error', (err: unknown) => {
+          console.warn('[PeerJS] Fallback/Error:', err);
+          if (!this.myPeerId && !this.isDestroyed) {
+            try {
+              const fbPeer = new Peer({
+                config: {
+                  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+                },
+              });
+              this.peer = fbPeer;
+              attachPeer(fbPeer, resolve, true);
+            } catch {
+              this.myPeerId = candidateId;
+              this.initSignaling();
+              resolve(candidateId);
+            }
+          }
+        });
+      }
+    };
+
     return new Promise((resolve) => {
       try {
         this.peer = new Peer(candidateId, {
@@ -203,50 +248,7 @@ export class WebRTCMeshRoom {
             ],
           },
         });
-
-        this.peer.on('open', (id) => {
-          if (this.isDestroyed) {
-            this.peer?.destroy();
-            resolve(id);
-            return;
-          }
-          this.myPeerId = id;
-          this.initSignaling();
-          resolve(id);
-        });
-
-        this.peer.on('error', (err: unknown) => {
-          console.warn('[PeerJS] Fallback/Error:', err);
-          if (!this.myPeerId && !this.isDestroyed) {
-            try {
-              this.peer = new Peer({
-                config: {
-                  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-                },
-              });
-              this.peer.on('open', (newId) => {
-                if (this.isDestroyed) {
-                  this.peer?.destroy();
-                  resolve(newId);
-                  return;
-                }
-                this.myPeerId = newId;
-                this.initSignaling();
-                resolve(newId);
-              });
-            } catch {
-              this.myPeerId = candidateId;
-              this.initSignaling();
-              resolve(candidateId);
-            }
-          }
-        });
-
-        this.peer.on('call', (call) => {
-          if (!this.localStream || this.isDestroyed) return;
-          call.answer(this.localStream, { sdpTransform: optimizeAudioSdp });
-          this.setupCall(call);
-        });
+        attachPeer(this.peer, resolve, false);
       } catch (err) {
         console.error('PeerJS init failed:', err);
         this.myPeerId = candidateId;
@@ -437,25 +439,48 @@ export class WebRTCMeshRoom {
     });
   }
 
+  private setupDataConnection(conn: DataConnection) {
+    this.dataConns.set(conn.peer, conn);
+    conn.on('data', (raw) => {
+      if (this.isDestroyed || !raw || typeof raw !== 'object') return;
+      this.callbacks.onRawMessage?.(raw as Record<string, unknown>);
+    });
+    conn.on('close', () => {
+      this.dataConns.delete(conn.peer);
+    });
+    conn.on('error', () => {
+      this.dataConns.delete(conn.peer);
+    });
+  }
+
   private callPeer(targetPeerId: string) {
     if (
       this.isDestroyed ||
       !this.peer ||
       !this.localStream ||
-      this.activeCalls.has(targetPeerId) ||
       targetPeerId === this.myPeerId
     ) {
       return;
     }
-    try {
-      const call = this.peer.call(targetPeerId, this.localStream, {
-        sdpTransform: optimizeAudioSdp,
-      });
-      if (call) {
-        this.setupCall(call);
+    if (!this.activeCalls.has(targetPeerId)) {
+      try {
+        const call = this.peer.call(targetPeerId, this.localStream, {
+          sdpTransform: optimizeAudioSdp,
+        });
+        if (call) {
+          this.setupCall(call);
+        }
+      } catch (err) {
+        console.warn('Failed to call peer:', targetPeerId, err);
       }
-    } catch (err) {
-      console.warn('Failed to call peer:', targetPeerId, err);
+    }
+    if (!this.dataConns.has(targetPeerId)) {
+      try {
+        const dc = this.peer.connect(targetPeerId, { reliable: true });
+        this.setupDataConnection(dc);
+      } catch {
+        // DataConnection is optional fast-path; WS relay remains active
+      }
     }
   }
 
@@ -540,6 +565,26 @@ export class WebRTCMeshRoom {
     });
     await Promise.all(promises);
     this.broadcastCameraState(Boolean(videoTrack));
+  }
+
+  public sendFastPeerData(payload: Record<string, unknown>) {
+    if (this.isDestroyed) return;
+    this.dataConns.forEach((conn) => {
+      if (conn.open) {
+        try {
+          conn.send(payload);
+        } catch {
+          // Ignore closing P2P DataChannel
+        }
+      }
+    });
+    if (this.localBroadcastChannel) {
+      try {
+        this.localBroadcastChannel.postMessage(payload);
+      } catch {
+        // Ignore
+      }
+    }
   }
 
   public sendCustomJson(payload: Record<string, unknown>) {
@@ -636,7 +681,7 @@ export class WebRTCMeshRoom {
         });
 
         if (this.myPeerId && msg.peerId && this.myPeerId > msg.peerId) {
-          setTimeout(() => this.callPeer(msg.peerId), 350);
+          setTimeout(() => this.callPeer(msg.peerId), 60);
         }
         break;
       }
@@ -657,7 +702,7 @@ export class WebRTCMeshRoom {
         }
 
         if (this.myPeerId && msg.peerId && this.myPeerId > msg.peerId) {
-          setTimeout(() => this.callPeer(msg.peerId), 350);
+          setTimeout(() => this.callPeer(msg.peerId), 60);
         }
         break;
       }
@@ -828,6 +873,11 @@ export class WebRTCMeshRoom {
       call.close();
       this.activeCalls.delete(peerId);
     }
+    const dc = this.dataConns.get(peerId);
+    if (dc) {
+      dc.close();
+      this.dataConns.delete(peerId);
+    }
     const audioEl = this.remoteAudioElements.get(peerId);
     if (audioEl) {
       audioEl.srcObject = null;
@@ -873,6 +923,8 @@ export class WebRTCMeshRoom {
 
     this.activeCalls.forEach((call) => call.close());
     this.activeCalls.clear();
+    this.dataConns.forEach((dc) => dc.close());
+    this.dataConns.clear();
     this.knownPeers.clear();
 
     this.remoteAudioElements.forEach((audio) => {
