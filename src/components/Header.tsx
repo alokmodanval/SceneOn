@@ -315,9 +315,9 @@ export const Header: React.FC<HeaderProps> = ({
                   playUiSound('click');
                   onOpenRestore();
                 }}
-                className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg bg-[#111116] border border-white/15 hover:border-violet-500 text-xs font-mono text-white/80 hover:text-white transition-all whitespace-nowrap flex-shrink-0"
+                className="flex items-center gap-1 px-2 sm:px-3 py-1.5 rounded-lg bg-[#111116] border border-white/15 hover:border-violet-500 text-xs font-mono text-white/80 hover:text-white transition-all whitespace-nowrap flex-shrink-0"
               >
-                <Key className="w-3.5 h-3.5 text-violet-400" />
+                <Key className="w-3.5 h-3.5 text-violet-400 flex-shrink-0" />
                 <span className="hidden sm:inline">Restore Account</span>
                 <span className="sm:hidden">Restore</span>
               </button>
@@ -327,10 +327,11 @@ export const Header: React.FC<HeaderProps> = ({
                   playUiSound('click');
                   onOpenOnboarding();
                 }}
-                className="neo-btn-lime px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-lg text-xs font-bold tracking-wide flex items-center gap-1.5 flex-shrink-0 whitespace-nowrap"
+                className="neo-btn-lime px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-lg text-xs font-bold tracking-wide flex items-center gap-1 flex-shrink-0 whitespace-nowrap"
               >
                 <Sparkles className="w-3.5 h-3.5 fill-black flex-shrink-0" />
-                <span>Create Profile</span>
+                <span className="hidden sm:inline">Create Profile</span>
+                <span className="sm:hidden">Join</span>
               </button>
             </>
           )}
