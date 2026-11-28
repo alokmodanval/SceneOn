@@ -5,11 +5,15 @@ interface UserRow {
   id: string;
   scene_key: string;
   alias: string;
+  username: string | null;
   avatar_json: string;
   tags_json: string;
   sliders_json: string;
   scene_prompt: string;
   scene_aura: number;
+  wins: number;
+  losses: number;
+  draws: number;
   is_online: number;
   last_seen: string;
   created_at: string;
@@ -49,6 +53,51 @@ interface MessageRow {
   created_at: string;
 }
 
+interface FriendshipRow {
+  id: string;
+  user_1: string;
+  user_2: string;
+  status: string;
+  requester_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface NotificationRow {
+  id: string;
+  user_id: string;
+  from_user_id: string;
+  from_alias: string;
+  from_username: string;
+  from_avatar_json: string;
+  type: string;
+  title: string;
+  body: string;
+  payload_json: string;
+  is_read: number;
+  created_at: string;
+}
+
+interface ChessGameRow {
+  id: string;
+  time_control_ms: number;
+  status: string;
+  winner_side: string | null;
+  white_id: string | null;
+  white_alias: string | null;
+  white_username: string;
+  white_avatar_json: string;
+  black_id: string | null;
+  black_alias: string | null;
+  black_username: string;
+  black_avatar_json: string;
+  pgn: string;
+  fen: string;
+  move_count: number;
+  created_at: string;
+  ended_at: string;
+}
+
 const DEFAULT_STARTER_ROOMS = [
   {
     id: 'room-1',
@@ -84,9 +133,11 @@ const DEFAULT_STARTER_ROOMS = [
 
 function getCorsHeaders(request: Request, env: Env): HeadersInit {
   const origin = request.headers.get('Origin') || '';
-  const allowedBase = env.ALLOWED_ORIGIN || 'https://friendsclub.tools4genz.com';
+  const allowedBase = env.ALLOWED_ORIGIN || 'https://chesschat.tools4genz.com';
   const isAllowed =
     origin === allowedBase ||
+    origin === 'https://chesschat.tools4genz.com' ||
+    origin === 'https://friendsclub.tools4genz.com' ||
     origin.endsWith('.friendsclub-88t.pages.dev') ||
     origin.startsWith('http://localhost:') ||
     origin.startsWith('http://127.0.0.1:');
@@ -115,16 +166,31 @@ function jsonResponse(
   });
 }
 
+function normalizeUsername(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const cleaned = raw
+    .trim()
+    .toLowerCase()
+    .replace(/^@+/, '')
+    .replace(/[^a-z0-9_]/g, '')
+    .slice(0, 20);
+  return cleaned.length >= 3 ? cleaned : null;
+}
+
 function mapUserRow(row: UserRow) {
   return {
     id: row.id,
     scene_key: row.scene_key,
     alias: row.alias,
+    username: row.username || undefined,
     avatar: JSON.parse(row.avatar_json),
     tags: JSON.parse(row.tags_json),
     sliders: JSON.parse(row.sliders_json),
     scene_prompt: row.scene_prompt,
     scene_aura: row.scene_aura,
+    wins: row.wins ?? 0,
+    losses: row.losses ?? 0,
+    draws: row.draws ?? 0,
     is_online: Boolean(row.is_online),
     last_seen: row.last_seen,
     created_at: row.created_at,
@@ -162,6 +228,45 @@ function mapChatRow(row: ChatRow) {
   };
 }
 
+function mapNotificationRow(row: NotificationRow) {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    from_user_id: row.from_user_id,
+    from_alias: row.from_alias,
+    from_username: row.from_username || undefined,
+    from_avatar: JSON.parse(row.from_avatar_json || '{"bg":"from-violet-600 to-indigo-900","emoji":"♟️"}'),
+    type: row.type,
+    title: row.title,
+    body: row.body,
+    payload: JSON.parse(row.payload_json || '{}'),
+    is_read: Boolean(row.is_read),
+    created_at: row.created_at,
+  };
+}
+
+function mapChessGameRow(row: ChessGameRow) {
+  return {
+    id: row.id,
+    timeControlMs: row.time_control_ms,
+    status: row.status,
+    winnerSide: row.winner_side as 'w' | 'b' | 'draw' | null,
+    whiteId: row.white_id,
+    whiteAlias: row.white_alias,
+    whiteUsername: row.white_username || undefined,
+    whiteAvatar: JSON.parse(row.white_avatar_json || '{"bg":"from-slate-600 to-slate-800","emoji":"♔"}'),
+    blackId: row.black_id,
+    blackAlias: row.black_alias,
+    blackUsername: row.black_username || undefined,
+    blackAvatar: JSON.parse(row.black_avatar_json || '{"bg":"from-slate-700 to-slate-900","emoji":"♚"}'),
+    pgn: row.pgn,
+    fen: row.fen,
+    moveCount: row.move_count,
+    createdAt: row.created_at,
+    endedAt: row.ended_at,
+  };
+}
+
 async function ensureStarterRooms(db: D1Database): Promise<void> {
   const existing = await db.prepare('SELECT COUNT(*) as cnt FROM scene_rooms').first<{ cnt: number }>();
   if ((existing?.cnt || 0) > 0) return;
@@ -176,6 +281,57 @@ async function ensureStarterRooms(db: D1Database): Promise<void> {
       .bind(r.id, r.title, r.vibe_tag, r.active_topic, now)
   );
   await db.batch(stmts);
+}
+
+async function pushNotification(
+  env: Env,
+  ctx: ExecutionContext,
+  params: {
+    userId: string;
+    fromUser: UserRow;
+    type: 'friend_request' | 'friend_accepted' | 'chess_invite';
+    title: string;
+    body: string;
+    payload?: Record<string, unknown>;
+  }
+) {
+  const notifId = `notif_${crypto.randomUUID().replace(/-/g, '').slice(0, 14)}`;
+  const now = new Date().toISOString();
+  const payloadJson = JSON.stringify(params.payload || {});
+
+  await env.DB.prepare(
+    `INSERT INTO notifications (
+      id, user_id, from_user_id, from_alias, from_username, from_avatar_json,
+      type, title, body, payload_json, is_read, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
+  )
+    .bind(
+      notifId,
+      params.userId,
+      params.fromUser.id,
+      params.fromUser.alias,
+      params.fromUser.username || '',
+      params.fromUser.avatar_json,
+      params.type,
+      params.title,
+      params.body,
+      payloadJson,
+      now
+    )
+    .run();
+
+  const saved = await env.DB.prepare('SELECT * FROM notifications WHERE id = ?')
+    .bind(notifId)
+    .first<NotificationRow>();
+  if (saved) {
+    ctx.waitUntil(
+      env.LOBBY_HUB.getByName('global-lobby').sendToUser(params.userId, {
+        type: 'notification',
+        notification: mapNotificationRow(saved),
+      })
+    );
+  }
+  return saved ? mapNotificationRow(saved) : null;
 }
 
 export default {
@@ -197,21 +353,28 @@ export default {
       if (path.startsWith('/ws/room/') || path.startsWith('/ws/chess/')) {
         const segments = path.split('/').filter(Boolean);
         const roomKey = `${segments[1]}_${segments[2] || 'default'}`;
+        const forwardUrl = new URL(request.url);
+        if (segments[1] === 'chess' && segments[2] && !forwardUrl.searchParams.has('gameId')) {
+          forwardUrl.searchParams.set('gameId', segments[2]);
+        }
         const stub = env.ROOM_RELAY.getByName(roomKey);
-        return stub.fetch(request);
+        return stub.fetch(new Request(forwardUrl.toString(), request));
       }
 
       // 2. Health check
       if (path === '/api/health' && request.method === 'GET') {
-        const [usersCount, roomsCount] = await Promise.all([
+        const [usersCount, roomsCount, gamesCount] = await Promise.all([
           env.DB.prepare('SELECT COUNT(*) as cnt FROM scene_users').first<{ cnt: number }>(),
           env.DB.prepare('SELECT COUNT(*) as cnt FROM scene_rooms').first<{ cnt: number }>(),
+          env.DB.prepare('SELECT COUNT(*) as cnt FROM chess_games').first<{ cnt: number }>(),
         ]);
         return jsonResponse(request, env, {
           ok: true,
           backend: 'cloudflare-d1-do',
+          brand: 'chesschat',
           users: usersCount?.cnt || 0,
           rooms: roomsCount?.cnt || 0,
+          games: gamesCount?.cnt || 0,
         });
       }
 
@@ -240,32 +403,87 @@ export default {
         });
       }
 
+      if (path === '/api/users/search' && request.method === 'GET') {
+        const q = (url.searchParams.get('q') || '').trim().toLowerCase().replace(/^@+/, '');
+        const excludeId = (url.searchParams.get('excludeUserId') || '').trim();
+        if (!q) {
+          const rows = await env.DB.prepare(
+            'SELECT * FROM scene_users WHERE id != ? ORDER BY last_seen DESC LIMIT 20'
+          )
+            .bind(excludeId)
+            .all<UserRow>();
+          return jsonResponse(request, env, { users: (rows.results || []).map(mapUserRow) });
+        }
+        const like = `%${q}%`;
+        const rows = await env.DB.prepare(
+          `SELECT * FROM scene_users
+           WHERE id != ? AND (LOWER(COALESCE(username, '')) LIKE ? OR LOWER(alias) LIKE ?)
+           ORDER BY last_seen DESC LIMIT 20`
+        )
+          .bind(excludeId, like, like)
+          .all<UserRow>();
+        return jsonResponse(request, env, { users: (rows.results || []).map(mapUserRow) });
+      }
+
+      if (path.startsWith('/api/users/username/') && request.method === 'GET') {
+        const username = normalizeUsername(decodeURIComponent(path.replace('/api/users/username/', '')));
+        if (!username) {
+          return jsonResponse(request, env, { available: false, user: null }, 400);
+        }
+        const row = await env.DB.prepare('SELECT * FROM scene_users WHERE username = ?')
+          .bind(username)
+          .first<UserRow>();
+        return jsonResponse(request, env, {
+          available: !row,
+          user: row ? mapUserRow(row) : null,
+        });
+      }
+
       if (path === '/api/users' && request.method === 'POST') {
         const body = (await request.json()) as Record<string, unknown>;
         const id = typeof body.id === 'string' ? body.id.trim().slice(0, 64) : '';
         const sceneKey = typeof body.scene_key === 'string' ? body.scene_key.trim().toUpperCase().slice(0, 32) : '';
         const alias = typeof body.alias === 'string' ? body.alias.trim().slice(0, 24) : '';
+        const username = normalizeUsername(body.username);
         if (!id || !sceneKey || !alias) {
           return jsonResponse(request, env, { error: 'Invalid user profile fields' }, 400);
         }
 
+        if (username) {
+          const conflict = await env.DB.prepare(
+            'SELECT id FROM scene_users WHERE username = ? AND id != ?'
+          )
+            .bind(username, id)
+            .first<{ id: string }>();
+          if (conflict) {
+            return jsonResponse(
+              request,
+              env,
+              { error: `@${username} is already taken! Pick another username.`, field: 'username' },
+              409
+            );
+          }
+        }
+
         const now = new Date().toISOString();
-        const avatarJson = JSON.stringify(body.avatar || { bg: 'from-violet-600 to-indigo-900', emoji: '⚡' });
+        const avatarJson = JSON.stringify(body.avatar || { bg: 'from-violet-600 to-indigo-900', emoji: '♟️' });
         const tagsJson = JSON.stringify(Array.isArray(body.tags) ? body.tags.slice(0, 6) : []);
         const slidersJson = JSON.stringify(body.sliders || { talk: 50, owl: 50, hustle: 50 });
         const prompt =
           typeof body.scene_prompt === 'string'
             ? body.scene_prompt.trim().slice(0, 160)
-            : 'Aaj ka scene kya hai?';
+            : 'Ready for Chess + Video Chat!';
         const aura = typeof body.scene_aura === 'number' ? Math.max(-5, body.scene_aura) : 5;
         const isOnline = body.is_online === false ? 0 : 1;
 
         await env.DB.prepare(
           `INSERT INTO scene_users (
-            id, scene_key, alias, avatar_json, tags_json, sliders_json, scene_prompt, scene_aura, is_online, last_seen, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, scene_key, alias, username, avatar_json, tags_json, sliders_json,
+            scene_prompt, scene_aura, is_online, last_seen, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             alias = excluded.alias,
+            username = COALESCE(excluded.username, scene_users.username),
             avatar_json = excluded.avatar_json,
             tags_json = excluded.tags_json,
             sliders_json = excluded.sliders_json,
@@ -273,7 +491,7 @@ export default {
             is_online = excluded.is_online,
             last_seen = excluded.last_seen`
         )
-          .bind(id, sceneKey, alias, avatarJson, tagsJson, slidersJson, prompt, aura, isOnline, now, now)
+          .bind(id, sceneKey, alias, username, avatarJson, tagsJson, slidersJson, prompt, aura, isOnline, now, now)
           .run();
 
         const saved = await env.DB.prepare('SELECT * FROM scene_users WHERE id = ?').bind(id).first<UserRow>();
@@ -307,7 +525,313 @@ export default {
         return jsonResponse(request, env, { user: row ? mapUserRow(row) : null });
       }
 
-      // 5. Aura Voting Endpoint (Server-enforced single vote per pair + safe delta bounds)
+      // 5. Friends System Endpoints
+      if (path === '/api/friends' && request.method === 'GET') {
+        const userId = (url.searchParams.get('userId') || '').trim();
+        if (!userId) return jsonResponse(request, env, { friends: [], incomingRequests: [], outgoingRequests: [] });
+
+        const rows = await env.DB.prepare(
+          'SELECT * FROM friendships WHERE user_1 = ? OR user_2 = ? ORDER BY updated_at DESC LIMIT 100'
+        )
+          .bind(userId, userId)
+          .all<FriendshipRow>();
+
+        const fRows = rows.results || [];
+        const otherIds = Array.from(new Set(fRows.map((r) => (r.user_1 === userId ? r.user_2 : r.user_1))));
+
+        const userMap = new Map<string, ReturnType<typeof mapUserRow>>();
+        if (otherIds.length > 0) {
+          const placeholders = otherIds.map(() => '?').join(',');
+          const userRes = await env.DB.prepare(`SELECT * FROM scene_users WHERE id IN (${placeholders})`)
+            .bind(...otherIds)
+            .all<UserRow>();
+          for (const u of userRes.results || []) {
+            userMap.set(u.id, mapUserRow(u));
+          }
+        }
+
+        const friends: Array<ReturnType<typeof mapUserRow> & { friendshipId: string }> = [];
+        const incomingRequests: Array<{ friendshipId: string; user: ReturnType<typeof mapUserRow>; createdAt: string }> = [];
+        const outgoingRequests: Array<{ friendshipId: string; user: ReturnType<typeof mapUserRow>; createdAt: string }> = [];
+
+        for (const r of fRows) {
+          const otherId = r.user_1 === userId ? r.user_2 : r.user_1;
+          const otherUser = userMap.get(otherId);
+          if (!otherUser) continue;
+
+          if (r.status === 'accepted') {
+            friends.push({ ...otherUser, friendshipId: r.id });
+          } else if (r.status === 'pending') {
+            if (r.requester_id === userId) {
+              outgoingRequests.push({ friendshipId: r.id, user: otherUser, createdAt: r.created_at });
+            } else {
+              incomingRequests.push({ friendshipId: r.id, user: otherUser, createdAt: r.created_at });
+            }
+          }
+        }
+
+        return jsonResponse(request, env, { friends, incomingRequests, outgoingRequests });
+      }
+
+      if (path === '/api/friends/request' && request.method === 'POST') {
+        const body = (await request.json()) as {
+          fromUserId?: string;
+          toUserId?: string;
+          toUsername?: string;
+        };
+        const fromUserId = body.fromUserId?.trim() || '';
+        const toUsername = normalizeUsername(body.toUsername);
+        let toUserId = body.toUserId?.trim() || '';
+
+        const fromUser = await env.DB.prepare('SELECT * FROM scene_users WHERE id = ?')
+          .bind(fromUserId)
+          .first<UserRow>();
+        if (!fromUser) {
+          return jsonResponse(request, env, { error: 'Sender profile not found. Please save your profile first.' }, 404);
+        }
+
+        let targetUser: UserRow | null = null;
+        if (toUserId) {
+          targetUser = await env.DB.prepare('SELECT * FROM scene_users WHERE id = ?').bind(toUserId).first<UserRow>();
+        } else if (toUsername) {
+          targetUser = await env.DB.prepare('SELECT * FROM scene_users WHERE username = ?')
+            .bind(toUsername)
+            .first<UserRow>();
+        }
+
+        if (!targetUser) {
+          return jsonResponse(request, env, { error: 'Player not found. Check @username!' }, 404);
+        }
+        toUserId = targetUser.id;
+        if (toUserId === fromUserId) {
+          return jsonResponse(request, env, { error: 'Cannot add yourself as a friend.' }, 400);
+        }
+
+        const [u1, u2] = [fromUserId, toUserId].sort();
+        const friendshipId = `fr_${u1.slice(0, 12)}_${u2.slice(0, 12)}`;
+        const existing = await env.DB.prepare(
+          'SELECT * FROM friendships WHERE user_1 = ? AND user_2 = ?'
+        )
+          .bind(u1, u2)
+          .first<FriendshipRow>();
+
+        const now = new Date().toISOString();
+
+        if (existing?.status === 'accepted') {
+          return jsonResponse(request, env, { ok: true, status: 'accepted', alreadyFriends: true });
+        }
+
+        // Auto-accept if target user already sent a request to us
+        if (existing?.status === 'pending' && existing.requester_id === toUserId) {
+          await env.DB.prepare('UPDATE friendships SET status = ?, updated_at = ? WHERE id = ?')
+            .bind('accepted', now, existing.id)
+            .run();
+          await pushNotification(env, ctx, {
+            userId: toUserId,
+            fromUser,
+            type: 'friend_accepted',
+            title: `${fromUser.alias} accepted your friend request!`,
+            body: `You and @${fromUser.username || fromUser.alias} are now ChessChat friends.`,
+            payload: { friendId: fromUserId },
+          });
+          const hub = env.LOBBY_HUB.getByName('global-lobby');
+          ctx.waitUntil(Promise.all([
+            hub.sendToUser(fromUserId, { type: 'friends_updated' }),
+            hub.sendToUser(toUserId, { type: 'friends_updated' }),
+          ]));
+          return jsonResponse(request, env, { ok: true, status: 'accepted' });
+        }
+
+        if (existing?.status === 'pending') {
+          return jsonResponse(request, env, { ok: true, status: 'pending', message: 'Request already sent!' });
+        }
+
+        await env.DB.prepare(
+          `INSERT INTO friendships (id, user_1, user_2, status, requester_id, created_at, updated_at)
+           VALUES (?, ?, ?, 'pending', ?, ?, ?)`
+        )
+          .bind(friendshipId, u1, u2, fromUserId, now, now)
+          .run();
+
+        await pushNotification(env, ctx, {
+          userId: toUserId,
+          fromUser,
+          type: 'friend_request',
+          title: `${fromUser.alias} sent a friend request`,
+          body: `@${fromUser.username || fromUser.alias} wants to add you to their ChessChat Friends List.`,
+          payload: { requesterId: fromUserId, friendshipId },
+        });
+
+        const hub = env.LOBBY_HUB.getByName('global-lobby');
+        ctx.waitUntil(Promise.all([
+          hub.sendToUser(fromUserId, { type: 'friends_updated' }),
+          hub.sendToUser(toUserId, { type: 'friends_updated' }),
+        ]));
+
+        return jsonResponse(request, env, { ok: true, status: 'pending', target: mapUserRow(targetUser) });
+      }
+
+      if (path === '/api/friends/respond' && request.method === 'POST') {
+        const body = (await request.json()) as {
+          userId?: string;
+          requesterId?: string;
+          action?: 'accept' | 'decline';
+        };
+        const userId = body.userId?.trim() || '';
+        const requesterId = body.requesterId?.trim() || '';
+        const action = body.action === 'accept' ? 'accept' : 'decline';
+        if (!userId || !requesterId) {
+          return jsonResponse(request, env, { error: 'userId and requesterId required' }, 400);
+        }
+
+        const [u1, u2] = [userId, requesterId].sort();
+        const existing = await env.DB.prepare('SELECT * FROM friendships WHERE user_1 = ? AND user_2 = ?')
+          .bind(u1, u2)
+          .first<FriendshipRow>();
+        if (!existing) {
+          return jsonResponse(request, env, { error: 'Friend request not found' }, 404);
+        }
+
+        const now = new Date().toISOString();
+        if (action === 'accept') {
+          await env.DB.prepare('UPDATE friendships SET status = ?, updated_at = ? WHERE id = ?')
+            .bind('accepted', now, existing.id)
+            .run();
+          const accepter = await env.DB.prepare('SELECT * FROM scene_users WHERE id = ?')
+            .bind(userId)
+            .first<UserRow>();
+          if (accepter) {
+            await pushNotification(env, ctx, {
+              userId: requesterId,
+              fromUser: accepter,
+              type: 'friend_accepted',
+              title: `${accepter.alias} is now your friend!`,
+              body: `Challenge @${accepter.username || accepter.alias} to Live Chess + Video anytime.`,
+              payload: { friendId: userId },
+            });
+          }
+        } else {
+          await env.DB.prepare('DELETE FROM friendships WHERE id = ?').bind(existing.id).run();
+        }
+
+        // Mark related friend_request notifications read
+        await env.DB.prepare(
+          "UPDATE notifications SET is_read = 1 WHERE user_id = ? AND from_user_id = ? AND type = 'friend_request'"
+        )
+          .bind(userId, requesterId)
+          .run();
+
+        const hub = env.LOBBY_HUB.getByName('global-lobby');
+        ctx.waitUntil(Promise.all([
+          hub.sendToUser(userId, { type: 'friends_updated' }),
+          hub.sendToUser(requesterId, { type: 'friends_updated' }),
+        ]));
+
+        return jsonResponse(request, env, { ok: true, status: action === 'accept' ? 'accepted' : 'declined' });
+      }
+
+      if (path === '/api/friends/remove' && request.method === 'POST') {
+        const body = (await request.json()) as { userId?: string; friendId?: string };
+        const userId = body.userId?.trim() || '';
+        const friendId = body.friendId?.trim() || '';
+        const [u1, u2] = [userId, friendId].sort();
+        await env.DB.prepare('DELETE FROM friendships WHERE user_1 = ? AND user_2 = ?').bind(u1, u2).run();
+        const hub = env.LOBBY_HUB.getByName('global-lobby');
+        ctx.waitUntil(Promise.all([
+          hub.sendToUser(userId, { type: 'friends_updated' }),
+          hub.sendToUser(friendId, { type: 'friends_updated' }),
+        ]));
+        return jsonResponse(request, env, { ok: true });
+      }
+
+      // 6. Notifications Endpoints
+      if (path === '/api/notifications' && request.method === 'GET') {
+        const userId = (url.searchParams.get('userId') || '').trim();
+        if (!userId) return jsonResponse(request, env, { notifications: [] });
+        const rows = await env.DB.prepare(
+          'SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 40'
+        )
+          .bind(userId)
+          .all<NotificationRow>();
+        return jsonResponse(request, env, {
+          notifications: (rows.results || []).map(mapNotificationRow),
+        });
+      }
+
+      if (path === '/api/notifications/read' && request.method === 'POST') {
+        const body = (await request.json()) as { userId?: string; notificationId?: string };
+        const userId = body.userId?.trim() || '';
+        if (!userId) return jsonResponse(request, env, { ok: false }, 400);
+
+        if (body.notificationId) {
+          await env.DB.prepare('UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?')
+            .bind(body.notificationId.trim(), userId)
+            .run();
+        } else {
+          await env.DB.prepare('UPDATE notifications SET is_read = 1 WHERE user_id = ?')
+            .bind(userId)
+            .run();
+        }
+        return jsonResponse(request, env, { ok: true });
+      }
+
+      // 7. Chess Invite & History Endpoints
+      if (path === '/api/chess/invite' && request.method === 'POST') {
+        const body = (await request.json()) as {
+          fromUserId?: string;
+          toUserId?: string;
+          timeControlMs?: number;
+        };
+        const fromUserId = body.fromUserId?.trim() || '';
+        const toUserId = body.toUserId?.trim() || '';
+        const timeControlMs =
+          typeof body.timeControlMs === 'number' && body.timeControlMs >= 60000 && body.timeControlMs <= 1800000
+            ? body.timeControlMs
+            : 300000;
+
+        if (!fromUserId || !toUserId || fromUserId === toUserId) {
+          return jsonResponse(request, env, { error: 'Valid inviter and opponent required' }, 400);
+        }
+
+        const fromUser = await env.DB.prepare('SELECT * FROM scene_users WHERE id = ?')
+          .bind(fromUserId)
+          .first<UserRow>();
+        const toUser = await env.DB.prepare('SELECT * FROM scene_users WHERE id = ?')
+          .bind(toUserId)
+          .first<UserRow>();
+        if (!fromUser || !toUser) {
+          return jsonResponse(request, env, { error: 'Player profile not found on server' }, 404);
+        }
+
+        const gameId = `chess_${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
+        const mins = Math.round(timeControlMs / 60000);
+
+        const notification = await pushNotification(env, ctx, {
+          userId: toUserId,
+          fromUser,
+          type: 'chess_invite',
+          title: `♟️ ${fromUser.alias} challenged you!`,
+          body: `@${fromUser.username || fromUser.alias} wants a ${mins}+0 Live Chess + Video match right now.`,
+          payload: { gameId, timeControlMs, color: 'b' },
+        });
+
+        return jsonResponse(request, env, { ok: true, gameId, notification, opponent: mapUserRow(toUser) });
+      }
+
+      if (path === '/api/chess/history' && request.method === 'GET') {
+        const userId = (url.searchParams.get('userId') || '').trim();
+        if (!userId) return jsonResponse(request, env, { games: [] });
+        const rows = await env.DB.prepare(
+          'SELECT * FROM chess_games WHERE white_id = ? OR black_id = ? ORDER BY ended_at DESC LIMIT 30'
+        )
+          .bind(userId, userId)
+          .all<ChessGameRow>();
+        return jsonResponse(request, env, {
+          games: (rows.results || []).map(mapChessGameRow),
+        });
+      }
+
+      // 8. Aura Voting Endpoint
       if (path === '/api/aura' && request.method === 'POST') {
         const body = (await request.json()) as {
           targetUserId?: string;
@@ -366,7 +890,7 @@ export default {
         return jsonResponse(request, env, { success: true, newAura });
       }
 
-      // 6. Voice Rooms Endpoints
+      // 9. Voice Rooms Endpoints
       if (path === '/api/rooms' && request.method === 'GET') {
         await ensureStarterRooms(env.DB);
         const requesterId = url.searchParams.get('userId');
@@ -453,7 +977,7 @@ export default {
         return jsonResponse(request, env, { valid });
       }
 
-      // 7. Chats & Messages Endpoints
+      // 10. Chats & Messages Endpoints
       if (path === '/api/chats' && request.method === 'POST') {
         const body = (await request.json()) as { user1Id?: string; user2Id?: string };
         const [firstId, secondId] = [body.user1Id?.trim() || '', body.user2Id?.trim() || ''].sort();

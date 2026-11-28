@@ -19,11 +19,15 @@ export interface SceneUser {
   id: string;
   scene_key: string;
   alias: string;
+  username?: string;
   avatar: UserAvatar;
   tags: string[];
   sliders: VibeSliders;
   scene_prompt: string;
   scene_aura: number;
+  wins?: number;
+  losses?: number;
+  draws?: number;
   is_online: boolean;
   last_seen: string;
   created_at?: string;
@@ -119,7 +123,63 @@ export interface SpeedDateSession {
 export interface ChessPlayerInfo {
   id: string;
   alias: string;
+  username?: string;
   avatar: UserAvatar;
+}
+
+export interface FriendRequestEntry {
+  friendshipId: string;
+  user: SceneUser;
+  createdAt: string;
+}
+
+export interface FriendsDataPayload {
+  friends: Array<SceneUser & { friendshipId?: string }>;
+  incomingRequests: FriendRequestEntry[];
+  outgoingRequests: FriendRequestEntry[];
+}
+
+export interface NotificationItem {
+  id: string;
+  user_id: string;
+  from_user_id: string;
+  from_alias: string;
+  from_username?: string;
+  from_avatar: UserAvatar;
+  type: 'friend_request' | 'friend_accepted' | 'chess_invite';
+  title: string;
+  body: string;
+  payload: {
+    gameId?: string;
+    timeControlMs?: number;
+    color?: 'w' | 'b';
+    requesterId?: string;
+    friendshipId?: string;
+    friendId?: string;
+  };
+  is_read: boolean;
+  created_at: string;
+}
+
+export interface ChessHistoryRecord {
+  id: string;
+  timeControlMs: number;
+  status: string;
+  winnerSide: 'w' | 'b' | 'draw' | null;
+  whiteId: string | null;
+  whiteAlias: string | null;
+  whiteUsername?: string;
+  whiteAvatar: UserAvatar;
+  blackId: string | null;
+  blackAlias: string | null;
+  blackUsername?: string;
+  blackAvatar: UserAvatar;
+  pgn: string;
+  fen: string;
+  moveCount: number;
+  createdAt: string;
+  endedAt: string;
+  isBot?: boolean;
 }
 
 export interface ChessMoveSummary {

@@ -65,6 +65,9 @@ export default defineConfig(({ mode }) => {
       proxy: {
         '/api/health': { target: localWorkerTarget, changeOrigin: true },
         '/api/users': { target: localWorkerTarget, changeOrigin: true },
+        '/api/friends': { target: localWorkerTarget, changeOrigin: true },
+        '/api/notifications': { target: localWorkerTarget, changeOrigin: true },
+        '/api/chess': { target: localWorkerTarget, changeOrigin: true },
         '/api/aura': { target: localWorkerTarget, changeOrigin: true },
         '/api/rooms': { target: localWorkerTarget, changeOrigin: true },
         '/api/chats': { target: localWorkerTarget, changeOrigin: true },

@@ -5,6 +5,7 @@ interface SocketAttachment {
   userId: string;
   alias: string;
   mode?: string;
+  gameId?: string;
 }
 
 type SpeedQueueRow = {
@@ -35,6 +36,17 @@ type ChessStateRow = {
   last_move_json: string | null;
   draw_offer_by: 'w' | 'b' | null;
   move_count: number;
+  game_id: string;
+  round_num: number;
+  saved_round: number;
+  created_at: string;
+};
+
+type StoredPlayer = {
+  id: string;
+  alias: string;
+  username?: string;
+  avatar?: unknown;
 };
 
 const CODENAMES = [
@@ -84,7 +96,7 @@ export class LobbyHub extends DurableObject<Env> {
 
     const url = new URL(request.url);
     const userId = (url.searchParams.get('userId') || `anon_${crypto.randomUUID().slice(0, 8)}`).slice(0, 64);
-    const alias = (url.searchParams.get('alias') || 'GenZPeer').slice(0, 32);
+    const alias = (url.searchParams.get('alias') || 'ChessPlayer').slice(0, 32);
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
@@ -106,6 +118,23 @@ export class LobbyHub extends DurableObject<Env> {
         // Ignore stale closing socket
       }
     }
+  }
+
+  async sendToUser(targetUserId: string, event: Record<string, unknown>): Promise<boolean> {
+    const payload = JSON.stringify(event);
+    let delivered = false;
+    for (const ws of this.ctx.getWebSockets()) {
+      const meta = ws.deserializeAttachment() as SocketAttachment | null;
+      if (meta?.userId === targetUserId) {
+        try {
+          ws.send(payload);
+          delivered = true;
+        } catch {
+          // Ignore stale closing socket
+        }
+      }
+    }
+    return delivered;
   }
 
   private getActiveUserIds(): string[] {
@@ -158,7 +187,8 @@ export class LobbyHub extends DurableObject<Env> {
     const now = Date.now();
 
     if (msg.type === 'ping') {
-      ws.send(JSON.stringify({ type: 'pong', onlineCount: this.getActiveUserIds().length }));
+      const onlineUserIds = this.getActiveUserIds();
+      ws.send(JSON.stringify({ type: 'pong', onlineCount: onlineUserIds.length, onlineUserIds }));
       return;
     }
 
@@ -168,7 +198,6 @@ export class LobbyHub extends DurableObject<Env> {
     }
 
     if (msg.type === 'speed_queue_join' && msg.user && typeof msg.user === 'object') {
-      // Expire stale queue rows (> 60s)
       this.ctx.storage.sql.exec('DELETE FROM speed_queue WHERE joined_at < ?', now - 60000);
 
       const waiting = this.ctx.storage.sql
@@ -335,9 +364,30 @@ export class RoomRelay extends DurableObject<Env> {
           last_move_at INTEGER,
           last_move_json TEXT,
           draw_offer_by TEXT,
-          move_count INTEGER NOT NULL DEFAULT 0
+          move_count INTEGER NOT NULL DEFAULT 0,
+          game_id TEXT NOT NULL DEFAULT '',
+          round_num INTEGER NOT NULL DEFAULT 1,
+          saved_round INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT ''
         );
       `);
+      // Backwards-compatible column migration for already-initialized DO SQLite instances
+      const cols = this.ctx.storage.sql
+        .exec<{ name: string }>('PRAGMA table_info(chess_state)')
+        .toArray()
+        .map((c) => c.name);
+      if (!cols.includes('game_id')) {
+        this.ctx.storage.sql.exec("ALTER TABLE chess_state ADD COLUMN game_id TEXT NOT NULL DEFAULT ''");
+      }
+      if (!cols.includes('round_num')) {
+        this.ctx.storage.sql.exec('ALTER TABLE chess_state ADD COLUMN round_num INTEGER NOT NULL DEFAULT 1');
+      }
+      if (!cols.includes('saved_round')) {
+        this.ctx.storage.sql.exec('ALTER TABLE chess_state ADD COLUMN saved_round INTEGER NOT NULL DEFAULT 0');
+      }
+      if (!cols.includes('created_at')) {
+        this.ctx.storage.sql.exec("ALTER TABLE chess_state ADD COLUMN created_at TEXT NOT NULL DEFAULT ''");
+      }
     });
   }
 
@@ -348,14 +398,15 @@ export class RoomRelay extends DurableObject<Env> {
 
     const url = new URL(request.url);
     const userId = (url.searchParams.get('userId') || `anon_${crypto.randomUUID().slice(0, 8)}`).slice(0, 64);
-    const alias = (url.searchParams.get('alias') || 'GenZPeer').slice(0, 32);
+    const alias = (url.searchParams.get('alias') || 'ChessPlayer').slice(0, 32);
     const mode = url.searchParams.get('mode') || 'room';
+    const gameId = url.searchParams.get('gameId') || '';
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ userId, alias, mode } satisfies SocketAttachment);
+    server.serializeAttachment({ userId, alias, mode, gameId } satisfies SocketAttachment);
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -373,22 +424,33 @@ export class RoomRelay extends DurableObject<Env> {
     }
   }
 
-  private getOrInitChessState(defaultTimeMs = 300000): ChessStateRow {
+  private getOrInitChessState(defaultTimeMs = 300000, gameId = ''): ChessStateRow {
     const rows = this.ctx.storage.sql
       .exec<ChessStateRow>('SELECT * FROM chess_state WHERE id = 1')
       .toArray();
-    if (rows.length > 0) return rows[0];
+    if (rows.length > 0) {
+      const existing = rows[0];
+      if (!existing.game_id && gameId) {
+        existing.game_id = gameId;
+        this.saveChessState(existing);
+      }
+      return existing;
+    }
 
     const startFen = new Chess().fen();
+    const nowIso = new Date().toISOString();
     this.ctx.storage.sql.exec(
       `INSERT INTO chess_state (
         id, fen, pgn, status, winner, turn, white_json, black_json,
-        time_control_ms, white_time_ms, black_time_ms, last_move_at, last_move_json, draw_offer_by, move_count
-      ) VALUES (1, ?, '', 'waiting', NULL, 'w', NULL, NULL, ?, ?, ?, NULL, NULL, NULL, 0)`,
+        time_control_ms, white_time_ms, black_time_ms, last_move_at, last_move_json,
+        draw_offer_by, move_count, game_id, round_num, saved_round, created_at
+      ) VALUES (1, ?, '', 'waiting', NULL, 'w', NULL, NULL, ?, ?, ?, NULL, NULL, NULL, 0, ?, 1, 0, ?)`,
       startFen,
       defaultTimeMs,
       defaultTimeMs,
-      defaultTimeMs
+      defaultTimeMs,
+      gameId,
+      nowIso
     );
     return this.ctx.storage.sql.exec<ChessStateRow>('SELECT * FROM chess_state WHERE id = 1').one();
   }
@@ -399,7 +461,8 @@ export class RoomRelay extends DurableObject<Env> {
         fen = ?, pgn = ?, status = ?, winner = ?, turn = ?,
         white_json = ?, black_json = ?, time_control_ms = ?,
         white_time_ms = ?, black_time_ms = ?, last_move_at = ?,
-        last_move_json = ?, draw_offer_by = ?, move_count = ?
+        last_move_json = ?, draw_offer_by = ?, move_count = ?,
+        game_id = ?, round_num = ?, saved_round = ?, created_at = ?
       WHERE id = 1`,
       state.fen,
       state.pgn,
@@ -414,7 +477,92 @@ export class RoomRelay extends DurableObject<Env> {
       state.last_move_at,
       state.last_move_json,
       state.draw_offer_by,
-      state.move_count
+      state.move_count,
+      state.game_id,
+      state.round_num,
+      state.saved_round,
+      state.created_at
+    );
+  }
+
+  private persistCompletedGameIfNeeded(state: ChessStateRow, fallbackGameId?: string): void {
+    const isFinished =
+      state.status === 'checkmate' ||
+      state.status === 'draw' ||
+      state.status === 'resigned' ||
+      state.status === 'timeout';
+    if (!isFinished || state.saved_round >= state.round_num) return;
+
+    const white = state.white_json ? (JSON.parse(state.white_json) as StoredPlayer) : null;
+    const black = state.black_json ? (JSON.parse(state.black_json) as StoredPlayer) : null;
+    if (!white || !black) return;
+
+    const resolvedGameId = state.game_id || fallbackGameId || `chess_${crypto.randomUUID().slice(0, 8)}`;
+    const recordId = `${resolvedGameId}_r${state.round_num}`;
+    state.saved_round = state.round_num;
+    this.saveChessState(state);
+
+    const endedAt = new Date().toISOString();
+    const createdAt = state.created_at || endedAt;
+
+    this.ctx.waitUntil(
+      (async () => {
+        try {
+          await this.env.DB.prepare(
+            `INSERT OR IGNORE INTO chess_games (
+              id, time_control_ms, status, winner_side,
+              white_id, white_alias, white_username, white_avatar_json,
+              black_id, black_alias, black_username, black_avatar_json,
+              pgn, fen, move_count, created_at, ended_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+            .bind(
+              recordId,
+              state.time_control_ms,
+              state.status,
+              state.winner,
+              white.id,
+              white.alias,
+              white.username || '',
+              JSON.stringify(white.avatar || {}),
+              black.id,
+              black.alias,
+              black.username || '',
+              JSON.stringify(black.avatar || {}),
+              state.pgn || '',
+              state.fen,
+              state.move_count,
+              createdAt,
+              endedAt
+            )
+            .run();
+
+          if (state.winner === 'w') {
+            await this.env.DB.batch([
+              this.env.DB.prepare('UPDATE scene_users SET wins = wins + 1 WHERE id = ?').bind(white.id),
+              this.env.DB.prepare('UPDATE scene_users SET losses = losses + 1 WHERE id = ?').bind(black.id),
+            ]);
+          } else if (state.winner === 'b') {
+            await this.env.DB.batch([
+              this.env.DB.prepare('UPDATE scene_users SET wins = wins + 1 WHERE id = ?').bind(black.id),
+              this.env.DB.prepare('UPDATE scene_users SET losses = losses + 1 WHERE id = ?').bind(white.id),
+            ]);
+          } else if (state.winner === 'draw') {
+            await this.env.DB.batch([
+              this.env.DB.prepare('UPDATE scene_users SET draws = draws + 1 WHERE id = ?').bind(white.id),
+              this.env.DB.prepare('UPDATE scene_users SET draws = draws + 1 WHERE id = ?').bind(black.id),
+            ]);
+          }
+
+          const hub = this.env.LOBBY_HUB.getByName('global-lobby');
+          await Promise.all([
+            hub.sendToUser(white.id, { type: 'history_updated', gameId: recordId }),
+            hub.sendToUser(black.id, { type: 'history_updated', gameId: recordId }),
+          ]);
+        } catch (err) {
+          console.error('Failed to persist completed chess game to D1:', err);
+        }
+      })()
     );
   }
 
@@ -476,20 +624,19 @@ export class RoomRelay extends DurableObject<Env> {
     const meta = ws.deserializeAttachment() as SocketAttachment | null;
     const senderId = meta?.userId || '';
 
-    // Handle Authoritative Chess Messages
     if (msgType.startsWith('chess_')) {
       const requestedTime =
         typeof msg.timeControlMs === 'number' && msg.timeControlMs >= 60000
           ? msg.timeControlMs
           : 300000;
-      const state = this.getOrInitChessState(requestedTime);
+      const state = this.getOrInitChessState(requestedTime, meta?.gameId || '');
       const now = Date.now();
 
       const rawPlayer = msg.player || msg.user;
       if (msgType === 'chess_join' && rawPlayer && typeof rawPlayer === 'object') {
-        const player = rawPlayer as { id: string; alias: string; avatar?: unknown };
-        const white = state.white_json ? (JSON.parse(state.white_json) as { id: string }) : null;
-        const black = state.black_json ? (JSON.parse(state.black_json) as { id: string }) : null;
+        const player = rawPlayer as StoredPlayer;
+        const white = state.white_json ? (JSON.parse(state.white_json) as StoredPlayer) : null;
+        const black = state.black_json ? (JSON.parse(state.black_json) as StoredPlayer) : null;
 
         const preferred = msg.preferredColor === 'w' || msg.preferredColor === 'b' ? msg.preferredColor : null;
         if (white?.id !== player.id && black?.id !== player.id) {
@@ -516,10 +663,9 @@ export class RoomRelay extends DurableObject<Env> {
       if (msgType === 'chess_move') {
         if (state.status !== 'active' && state.status !== 'waiting') return;
 
-        const white = state.white_json ? (JSON.parse(state.white_json) as { id: string }) : null;
-        const black = state.black_json ? (JSON.parse(state.black_json) as { id: string }) : null;
+        const white = state.white_json ? (JSON.parse(state.white_json) as StoredPlayer) : null;
+        const black = state.black_json ? (JSON.parse(state.black_json) as StoredPlayer) : null;
 
-        // Enforce player turn ownership
         if (state.turn === 'w' && white && white.id !== senderId) return;
         if (state.turn === 'b' && black && black.id !== senderId) return;
 
@@ -534,6 +680,7 @@ export class RoomRelay extends DurableObject<Env> {
         if (chess.fen() !== state.fen) {
           chess = new Chess(state.fen);
         }
+
         const from = typeof msg.from === 'string' ? msg.from : '';
         const to = typeof msg.to === 'string' ? msg.to : '';
         const promotion =
@@ -572,6 +719,7 @@ export class RoomRelay extends DurableObject<Env> {
           }
 
           this.saveChessState(state);
+          this.persistCompletedGameIfNeeded(state, meta?.gameId);
           this.broadcastToAll(this.formatChessSyncPayload(state));
         } catch {
           // Illegal move ignored safely
@@ -580,8 +728,8 @@ export class RoomRelay extends DurableObject<Env> {
       }
 
       if (msgType === 'chess_resign' && (state.status === 'active' || state.status === 'waiting')) {
-        const white = state.white_json ? (JSON.parse(state.white_json) as { id: string }) : null;
-        const black = state.black_json ? (JSON.parse(state.black_json) as { id: string }) : null;
+        const white = state.white_json ? (JSON.parse(state.white_json) as StoredPlayer) : null;
+        const black = state.black_json ? (JSON.parse(state.black_json) as StoredPlayer) : null;
         if (white?.id === senderId) {
           state.status = 'resigned';
           state.winner = 'b';
@@ -592,6 +740,7 @@ export class RoomRelay extends DurableObject<Env> {
           return;
         }
         this.saveChessState(state);
+        this.persistCompletedGameIfNeeded(state, meta?.gameId);
         this.broadcastToAll(this.formatChessSyncPayload(state));
         return;
       }
@@ -603,13 +752,14 @@ export class RoomRelay extends DurableObject<Env> {
         if (loser === 'w') state.white_time_ms = 0;
         else state.black_time_ms = 0;
         this.saveChessState(state);
+        this.persistCompletedGameIfNeeded(state, meta?.gameId);
         this.broadcastToAll(this.formatChessSyncPayload(state));
         return;
       }
 
       if (msgType === 'chess_draw_offer' && state.status === 'active') {
-        const white = state.white_json ? (JSON.parse(state.white_json) as { id: string }) : null;
-        const black = state.black_json ? (JSON.parse(state.black_json) as { id: string }) : null;
+        const white = state.white_json ? (JSON.parse(state.white_json) as StoredPlayer) : null;
+        const black = state.black_json ? (JSON.parse(state.black_json) as StoredPlayer) : null;
         if (white?.id === senderId) state.draw_offer_by = 'w';
         else if (black?.id === senderId) state.draw_offer_by = 'b';
         else return;
@@ -623,12 +773,12 @@ export class RoomRelay extends DurableObject<Env> {
         state.winner = 'draw';
         state.draw_offer_by = null;
         this.saveChessState(state);
+        this.persistCompletedGameIfNeeded(state, meta?.gameId);
         this.broadcastToAll(this.formatChessSyncPayload(state));
         return;
       }
 
       if (msgType === 'chess_rematch') {
-        // Swap white and black on rematch
         const prevWhite = state.white_json;
         const prevBlack = state.black_json;
         const startFen = new Chess().fen();
@@ -645,6 +795,8 @@ export class RoomRelay extends DurableObject<Env> {
         state.last_move_json = null;
         state.draw_offer_by = null;
         state.move_count = 0;
+        state.round_num += 1;
+        state.created_at = new Date().toISOString();
         this.saveChessState(state);
         this.broadcastToAll(this.formatChessSyncPayload(state));
         return;
@@ -652,7 +804,6 @@ export class RoomRelay extends DurableObject<Env> {
       return;
     }
 
-    // Standard WebRTC signaling / room events: broadcast to other room clients
     this.broadcastToOthers(ws, rawMessage);
   }
 

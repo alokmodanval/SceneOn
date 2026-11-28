@@ -1,5 +1,14 @@
 import { createClient } from '@supabase/supabase-js';
-import { SceneChat, SceneMessage, SceneRoom, SceneUser, UserSocials } from '../types';
+import {
+  ChessHistoryRecord,
+  FriendsDataPayload,
+  NotificationItem,
+  SceneChat,
+  SceneMessage,
+  SceneRoom,
+  SceneUser,
+  UserSocials,
+} from '../types';
 import { INITIAL_ROOMS } from './mockData';
 import { AI_PERSONAS_ENABLED, getAIPersonaUsers } from './groqEngine';
 import { buildApiUrl } from './backendConfig';
@@ -31,6 +40,7 @@ const STORAGE_CHATS_KEY = 'sceneon_all_chats';
 const STORAGE_MSGS_KEY = 'sceneon_all_messages';
 const STORAGE_AURA_VOTES = 'sceneon_aura_voted_pairs';
 const STORAGE_AI_AURA_KEY = 'sceneon_ai_aura_map';
+const STORAGE_LOCAL_CHESS_HISTORY = 'chesschat_local_history';
 
 // Cross-tab synchronization bus
 let tabSyncBus: BroadcastChannel | null = null;
@@ -97,6 +107,28 @@ async function d1FetchJson<T>(path: string, init?: RequestInit): Promise<T | nul
     return (await res.json()) as T;
   } catch {
     return null;
+  }
+}
+
+async function d1FetchStatus<T>(
+  path: string,
+  init?: RequestInit
+): Promise<{ status: number; data: T | null }> {
+  if (typeof fetch === 'undefined') return { status: 0, data: null };
+  try {
+    const res = await fetch(buildApiUrl(path), {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init?.headers || {}),
+      },
+    });
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) return { status: res.status, data: null };
+    const data = (await res.json()) as T;
+    return { status: res.status, data };
+  } catch {
+    return { status: 0, data: null };
   }
 }
 
@@ -612,4 +644,181 @@ export async function voteAura(
   notifyLocalChange('aura_voted', { targetUserId, newAura: updatedAura });
 
   return { success: true, newAura: updatedAura };
+}
+
+// ----------------- CHESSCHAT USERNAME, FRIENDS, NOTIFICATIONS & HISTORY -----------------
+export async function registerOrUpdateSceneUser(
+  user: SceneUser
+): Promise<{ user?: SceneUser; error?: string; status?: number }> {
+  const safeUser: SceneUser = {
+    ...user,
+    alias: user.alias.trim().slice(0, 24) || 'ChessPlayer',
+    username: user.username?.trim().toLowerCase().replace(/^@+/, '').replace(/[^a-z0-9_]/g, '').slice(0, 20),
+    scene_prompt: user.scene_prompt.trim().slice(0, 160) || 'Ready for Live Chess + Video Chat!',
+    tags: (user.tags || []).slice(0, 6).map((t) => t.slice(0, 36)),
+    last_seen: new Date().toISOString(),
+  };
+
+  const { status, data } = await d1FetchStatus<{ user?: SceneUser; error?: string }>('/api/users', {
+    method: 'POST',
+    body: JSON.stringify(safeUser),
+  });
+
+  if (status === 409) {
+    return { status: 409, error: data?.error || 'Username already taken!' };
+  }
+
+  if (data?.user) {
+    initLocalStore();
+    const allUsers = getStored<SceneUser[]>(STORAGE_USERS_KEY, []);
+    const idx = allUsers.findIndex((u) => u.id === data.user!.id);
+    if (idx >= 0) allUsers[idx] = data.user;
+    else allUsers.unshift(data.user);
+    setStored(STORAGE_USERS_KEY, allUsers);
+    notifyLocalChange('users_updated', { user: data.user });
+    return { user: data.user, status: 200 };
+  }
+
+  const saved = await upsertSceneUser(safeUser);
+  return { user: saved, status: status || 200 };
+}
+
+export async function checkUsernameAvailability(
+  username: string
+): Promise<{ available: boolean; user: SceneUser | null }> {
+  const clean = username.trim().toLowerCase().replace(/^@+/, '').replace(/[^a-z0-9_]/g, '');
+  if (clean.length < 3) return { available: false, user: null };
+  const remote = await d1FetchJson<{ available: boolean; user: SceneUser | null }>(
+    `/api/users/username/${encodeURIComponent(clean)}`
+  );
+  if (remote) return remote;
+  return { available: true, user: null };
+}
+
+export async function searchPlayersByUsername(
+  query: string,
+  excludeUserId?: string
+): Promise<SceneUser[]> {
+  const params = new URLSearchParams();
+  if (query.trim()) params.set('q', query.trim());
+  if (excludeUserId) params.set('excludeUserId', excludeUserId);
+  const remote = await d1FetchJson<{ users?: SceneUser[] }>(`/api/users/search?${params.toString()}`);
+  if (remote?.users) return remote.users;
+  const local = getStored<SceneUser[]>(STORAGE_USERS_KEY, []);
+  const q = query.trim().toLowerCase().replace(/^@+/, '');
+  return local.filter(
+    (u) =>
+      u.id !== excludeUserId &&
+      (!q || u.alias.toLowerCase().includes(q) || (u.username || '').toLowerCase().includes(q))
+  );
+}
+
+export async function fetchFriendsData(userId: string): Promise<FriendsDataPayload> {
+  if (!userId) return { friends: [], incomingRequests: [], outgoingRequests: [] };
+  const remote = await d1FetchJson<FriendsDataPayload>(
+    `/api/friends?userId=${encodeURIComponent(userId)}`
+  );
+  if (remote) return remote;
+  return { friends: [], incomingRequests: [], outgoingRequests: [] };
+}
+
+export async function sendFriendRequest(params: {
+  fromUserId: string;
+  toUserId?: string;
+  toUsername?: string;
+}): Promise<{ ok: boolean; status?: string; error?: string; alreadyFriends?: boolean }> {
+  const { status, data } = await d1FetchStatus<{
+    ok?: boolean;
+    status?: string;
+    error?: string;
+    alreadyFriends?: boolean;
+  }>('/api/friends/request', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+  if (data) {
+    return {
+      ok: Boolean(data.ok) && status < 400,
+      status: data.status,
+      error: data.error,
+      alreadyFriends: data.alreadyFriends,
+    };
+  }
+  return { ok: false, error: 'Could not reach server to send request.' };
+}
+
+export async function respondToFriendRequest(
+  userId: string,
+  requesterId: string,
+  action: 'accept' | 'decline'
+): Promise<boolean> {
+  const remote = await d1FetchJson<{ ok?: boolean }>('/api/friends/respond', {
+    method: 'POST',
+    body: JSON.stringify({ userId, requesterId, action }),
+  });
+  return Boolean(remote?.ok);
+}
+
+export async function removeFriend(userId: string, friendId: string): Promise<boolean> {
+  const remote = await d1FetchJson<{ ok?: boolean }>('/api/friends/remove', {
+    method: 'POST',
+    body: JSON.stringify({ userId, friendId }),
+  });
+  return Boolean(remote?.ok);
+}
+
+export async function fetchNotifications(userId: string): Promise<NotificationItem[]> {
+  if (!userId) return [];
+  const remote = await d1FetchJson<{ notifications?: NotificationItem[] }>(
+    `/api/notifications?userId=${encodeURIComponent(userId)}`
+  );
+  return remote?.notifications || [];
+}
+
+export async function markNotificationsRead(userId: string, notificationId?: string): Promise<void> {
+  if (!userId) return;
+  await d1FetchJson('/api/notifications/read', {
+    method: 'POST',
+    body: JSON.stringify({ userId, notificationId }),
+  });
+}
+
+export async function sendChessInvite(
+  fromUserId: string,
+  toUserId: string,
+  timeControlMs: number
+): Promise<{ ok: boolean; gameId?: string; error?: string }> {
+  const { status, data } = await d1FetchStatus<{ ok?: boolean; gameId?: string; error?: string }>(
+    '/api/chess/invite',
+    {
+      method: 'POST',
+      body: JSON.stringify({ fromUserId, toUserId, timeControlMs }),
+    }
+  );
+  if (data && status < 400 && data.ok && data.gameId) {
+    return { ok: true, gameId: data.gameId };
+  }
+  return { ok: false, error: data?.error || 'Could not send challenge notification.' };
+}
+
+export function saveLocalChessHistoryRecord(record: ChessHistoryRecord): void {
+  const existing = getStored<ChessHistoryRecord[]>(STORAGE_LOCAL_CHESS_HISTORY, []);
+  const deduped = existing.filter((g) => g.id !== record.id);
+  deduped.unshift(record);
+  setStored(STORAGE_LOCAL_CHESS_HISTORY, deduped.slice(0, 30));
+  notifyLocalChange('history_updated', { gameId: record.id });
+}
+
+export async function fetchChessHistory(userId: string): Promise<ChessHistoryRecord[]> {
+  const remote = userId
+    ? await d1FetchJson<{ games?: ChessHistoryRecord[] }>(
+        `/api/chess/history?userId=${encodeURIComponent(userId)}`
+      )
+    : null;
+  const serverGames = remote?.games || [];
+  const localGames = getStored<ChessHistoryRecord[]>(STORAGE_LOCAL_CHESS_HISTORY, []);
+  const seen = new Set(serverGames.map((g) => g.id));
+  const merged = [...serverGames, ...localGames.filter((g) => !seen.has(g.id))];
+  merged.sort((a, b) => new Date(b.endedAt).getTime() - new Date(a.endedAt).getTime());
+  return merged.slice(0, 30);
 }

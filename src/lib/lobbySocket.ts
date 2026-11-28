@@ -1,12 +1,20 @@
 import { buildWsUrl } from './backendConfig';
-import { ChessMatchedPayload, SceneUser, SpeedMatchedPayload } from '../types';
+import {
+  ChessMatchedPayload,
+  NotificationItem,
+  SceneUser,
+  SpeedMatchedPayload,
+} from '../types';
 
 export type LobbyEvent =
   | { type: 'presence_update'; onlineCount: number; onlineUserIds: string[] }
-  | { type: 'pong'; onlineCount?: number }
+  | { type: 'pong'; onlineCount?: number; onlineUserIds?: string[] }
   | { type: 'users_updated'; user?: SceneUser }
   | { type: 'rooms_updated' }
   | { type: 'aura_voted'; targetUserId: string; newAura: number }
+  | { type: 'notification'; notification: NotificationItem }
+  | { type: 'friends_updated' }
+  | { type: 'history_updated'; gameId?: string }
   | { type: 'speed_queued' }
   | ({ type: 'speed_matched' } & SpeedMatchedPayload)
   | { type: 'chess_queued' }
@@ -23,6 +31,7 @@ class LobbySocketClient {
   private reconnectTimer: number | null = null;
   private intentionalClose = false;
   public onlineCount = 0;
+  public onlineUserIds: string[] = [];
 
   public connect(userId: string, alias: string) {
     if (typeof window === 'undefined' || !userId) return;
@@ -48,11 +57,21 @@ class LobbySocketClient {
         try {
           const data = JSON.parse(String(event.data)) as LobbyEvent & { type: string };
           if (data.type === 'presence_update' || data.type === 'pong') {
-            if (typeof (data as { onlineCount?: number }).onlineCount === 'number') {
-              this.onlineCount = (data as { onlineCount: number }).onlineCount;
+            if (typeof data.onlineCount === 'number') {
+              this.onlineCount = data.onlineCount;
+            }
+            if (Array.isArray(data.onlineUserIds)) {
+              this.onlineUserIds = data.onlineUserIds;
             }
           }
-          if (data.type === 'users_updated' || data.type === 'rooms_updated' || data.type === 'aura_voted') {
+          if (
+            data.type === 'users_updated' ||
+            data.type === 'rooms_updated' ||
+            data.type === 'aura_voted' ||
+            data.type === 'friends_updated' ||
+            data.type === 'history_updated' ||
+            data.type === 'notification'
+          ) {
             window.dispatchEvent(new CustomEvent('sceneon-sync', { detail: data }));
           }
           this.listeners.forEach((cb) => cb(data));
@@ -101,6 +120,11 @@ class LobbySocketClient {
     };
   }
 
+  public isOnline(userId?: string | null): boolean {
+    if (!userId) return false;
+    return this.onlineUserIds.includes(userId);
+  }
+
   public send(payload: Record<string, unknown>): boolean {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
@@ -121,7 +145,10 @@ class LobbySocketClient {
     return this.send({ type: 'speed_queue_leave' });
   }
 
-  public joinChessQueue(user: { id: string; alias: string; avatar: SceneUser['avatar'] }, timeControlMs: number): boolean {
+  public joinChessQueue(
+    user: { id: string; alias: string; username?: string; avatar: SceneUser['avatar'] },
+    timeControlMs: number
+  ): boolean {
     return this.send({ type: 'chess_queue_join', user, timeControlMs });
   }
 

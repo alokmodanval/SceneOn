@@ -1,6 +1,6 @@
 {
-  "short_name": "FriendsClub",
-  "name": "FriendsClub — Zero-Login Vibe Matching & Live Voice Pods",
+  "short_name": "ChessChat",
+  "name": "ChessChat — Live Chess + Voice & Video Chat",
   "icons": [
     {
       "src": "/favicon.svg",
@@ -13,5 +13,5 @@
   "theme_color": "#070709",
   "display": "standalone",
   "orientation": "portrait",
-  "description": "Zero-Login Vibe Matching, Creep-Free Chat & Live Voice Pods for Gen Z."
+  "description": "Zero-login multiplayer chess with crystal-clear voice & camera video chat, friends list, and instant notifications."
 }

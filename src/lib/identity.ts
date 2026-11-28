@@ -92,26 +92,57 @@ export function saveCurrentUser(user: SceneUser): void {
   }
 }
 
+export function clearCurrentUser(): void {
+  try {
+    localStorage.removeItem(CURRENT_USER_KEY);
+    window.dispatchEvent(new CustomEvent('sceneon-auth-change', { detail: { user: null } }));
+  } catch (err) {
+    console.error('Error clearing current user:', err);
+  }
+}
+
+export function normalizeUsernameInput(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/^@+/, '')
+    .replace(/[^a-z0-9_]/g, '')
+    .slice(0, 20);
+}
+
+export function suggestUsernameFromName(name: string): string {
+  const base = normalizeUsernameInput(name.replace(/\s+/g, '_')).slice(0, 14) || 'player';
+  const suffix = String(10 + secureRandomInt(89));
+  return `${base.length < 3 ? `chess_${base}` : base}_${suffix}`;
+}
+
 export function createNewSceneUser(params: {
   alias: string;
+  username?: string;
   avatar: UserAvatar;
   tags: string[];
   sliders: VibeSliders;
   scene_prompt: string;
 }): SceneUser {
   const safeAlias = params.alias.trim().slice(0, 24) || generateRandomAlias();
+  const safeUsername =
+    normalizeUsernameInput(params.username || '') || suggestUsernameFromName(safeAlias);
   const safePrompt =
-    params.scene_prompt.trim().slice(0, 160) || 'Aaj ka scene kya hai? Let’s connect!';
+    params.scene_prompt.trim().slice(0, 160) || 'Ready for Chess + Video Chat!';
 
   const newUser: SceneUser = {
     id: generateUUID(),
     scene_key: generateSceneKey(),
     alias: safeAlias,
+    username: safeUsername,
     avatar: params.avatar,
     tags: (params.tags || []).slice(0, 6),
     sliders: params.sliders,
     scene_prompt: safePrompt,
     scene_aura: 5,
+    wins: 0,
+    losses: 0,
+    draws: 0,
     is_online: true,
     last_seen: new Date().toISOString(),
     created_at: new Date().toISOString(),

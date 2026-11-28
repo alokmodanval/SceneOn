@@ -12,10 +12,12 @@ import {
   createNewSceneUser,
   generateRandomAlias,
   generateRandomAvatar,
+  normalizeUsernameInput,
   saveCurrentUser,
+  suggestUsernameFromName,
 } from '../lib/identity';
 import { playUiSound } from '../lib/audioEngine';
-import { upsertSceneUser } from '../lib/supabase';
+import { registerOrUpdateSceneUser } from '../lib/supabase';
 
 interface OnboardingModalProps {
   isOpen: boolean;
@@ -34,6 +36,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
 
   // Form State
   const [alias, setAlias] = useState(currentUser?.alias || generateRandomAlias());
+  const [username, setUsername] = useState(
+    currentUser?.username || suggestUsernameFromName(currentUser?.alias || 'player')
+  );
   const [avatar, setAvatar] = useState<UserAvatar>(
     currentUser?.avatar || generateRandomAvatar()
   );
@@ -80,7 +85,11 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
 
     if (step === 1) {
       if (!alias.trim()) {
-        setErrorMsg('Please pick or roll an alias!');
+        setErrorMsg('Please enter your Name!');
+        return;
+      }
+      if (normalizeUsernameInput(username).length < 3) {
+        setErrorMsg('Username must be at least 3 letters/numbers (e.g. alok_99).');
         return;
       }
       setStep(2);
@@ -102,28 +111,39 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   };
 
   const handleComplete = async () => {
-    let savedUser: SceneUser;
+    const cleanUsername = normalizeUsernameInput(username) || suggestUsernameFromName(alias);
+    let candidateUser: SceneUser;
     if (currentUser) {
-      savedUser = {
+      candidateUser = {
         ...currentUser,
         alias: alias.trim(),
+        username: cleanUsername,
         avatar,
         tags: selectedTags,
         sliders,
         scene_prompt: scenePrompt.trim(),
         last_seen: new Date().toISOString(),
       };
-      saveCurrentUser(savedUser);
-      await upsertSceneUser(savedUser);
     } else {
-      savedUser = createNewSceneUser({
+      candidateUser = createNewSceneUser({
         alias: alias.trim(),
+        username: cleanUsername,
         avatar,
         tags: selectedTags,
         sliders,
         scene_prompt: scenePrompt.trim(),
       });
     }
+
+    const res = await registerOrUpdateSceneUser(candidateUser);
+    if (res.status === 409) {
+      setStep(1);
+      setErrorMsg(res.error || 'That @username is already taken. Try another one!');
+      return;
+    }
+
+    const savedUser = res.user || candidateUser;
+    saveCurrentUser(savedUser);
 
     playUiSound('unlock');
     confetti({
@@ -141,15 +161,13 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
       <div className="relative w-full max-w-xl bg-[#111116] border-2 border-[#CCFF00] rounded-2xl p-5 sm:p-7 shadow-neo max-h-[90dvh] flex flex-col">
         {/* Close Button */}
-        {currentUser && (
-          <button
-            onClick={onClose}
-            aria-label="Close onboarding"
-            className="absolute top-4 right-4 p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/60 hover:text-white transition-colors z-10"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        )}
+        <button
+          onClick={onClose}
+          aria-label="Close onboarding"
+          className="absolute top-4 right-4 p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/60 hover:text-white transition-colors z-10"
+        >
+          <X className="w-5 h-5" />
+        </button>
 
         {/* Header / Step Tracker */}
         <div className="mb-4 flex-shrink-0 pr-8">
@@ -203,26 +221,45 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               </div>
 
               <div className="flex-1 w-full space-y-3">
-                <label className="text-xs font-mono text-white/70 block">
-                  GEN Z ALIAS
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={alias}
-                    maxLength={20}
-                    onChange={(e) => setAlias(e.target.value)}
-                    placeholder="e.g. MidnightYapper"
-                    className="flex-1 px-4 py-2.5 rounded-lg bg-[#070709] border border-white/20 focus:border-[#CCFF00] text-white font-heading font-bold outline-none transition-colors"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleRollAlias}
-                    className="px-3 py-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-white font-mono text-xs flex items-center gap-1.5 transition-all"
-                  >
-                    <Dices className="w-4 h-4 text-[#CCFF00]" />
-                    <span>Roll</span>
-                  </button>
+                <div>
+                  <label className="text-xs font-mono text-white/70 block mb-1">
+                    YOUR NAME
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={alias}
+                      maxLength={24}
+                      onChange={(e) => setAlias(e.target.value)}
+                      placeholder="e.g. Alok"
+                      className="flex-1 min-w-0 px-4 py-2 rounded-lg bg-[#070709] border border-white/20 focus:border-[#CCFF00] text-white font-heading font-bold outline-none transition-colors"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleRollAlias}
+                      className="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white font-mono text-xs flex items-center gap-1.5 transition-all"
+                    >
+                      <Dices className="w-4 h-4 text-[#CCFF00]" />
+                      <span>Roll</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-mono text-white/70 block mb-1">
+                    UNIQUE @USERNAME (FOR FRIENDS & CHESS INVITES)
+                  </label>
+                  <div className="flex items-center px-3 py-2 rounded-lg bg-[#070709] border border-white/20 focus-within:border-cyan-400">
+                    <span className="font-mono text-sm text-cyan-300 mr-1">@</span>
+                    <input
+                      type="text"
+                      value={username}
+                      maxLength={20}
+                      onChange={(e) => setUsername(normalizeUsernameInput(e.target.value))}
+                      placeholder="alok_chess"
+                      className="flex-1 min-w-0 bg-transparent text-white font-mono text-sm outline-none"
+                    />
+                  </div>
                 </div>
               </div>
             </div>

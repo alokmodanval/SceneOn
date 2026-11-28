@@ -1,4 +1,5 @@
 import { Chess, PieceSymbol } from 'chess.js';
+import { getAudioContext } from './audioEngine';
 
 export interface ChessTimeOption {
   label: string;
@@ -83,6 +84,59 @@ export function formatChessClock(ms: number): string {
     return `0:${secs.toString().padStart(2, '0')}.${tenths}`;
   }
   return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
+
+export function playChessSound(kind: 'move' | 'capture' | 'check' | 'gameover' | 'notify') {
+  try {
+    const ctx = getAudioContext();
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    if (kind === 'move') {
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(240, now);
+      osc.frequency.exponentialRampToValueAtTime(110, now + 0.055);
+      gain.gain.setValueAtTime(0.18, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.055);
+      osc.start(now);
+      osc.stop(now + 0.055);
+    } else if (kind === 'capture') {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(320, now);
+      osc.frequency.exponentialRampToValueAtTime(85, now + 0.09);
+      gain.gain.setValueAtTime(0.22, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+      osc.start(now);
+      osc.stop(now + 0.09);
+    } else if (kind === 'check') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(660, now);
+      osc.frequency.exponentialRampToValueAtTime(880, now + 0.14);
+      gain.gain.setValueAtTime(0.18, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+      osc.start(now);
+      osc.stop(now + 0.15);
+    } else {
+      const notes = kind === 'gameover' ? [523.25, 659.25, 783.99] : [783.99, 1046.5];
+      notes.forEach((freq, idx) => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(freq, now + idx * 0.08);
+        g.gain.setValueAtTime(0.14, now + idx * 0.08);
+        g.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.08 + 0.25);
+        o.connect(g);
+        g.connect(ctx.destination);
+        o.start(now + idx * 0.08);
+        o.stop(now + idx * 0.08 + 0.25);
+      });
+    }
+  } catch {
+    // Graceful fallback if audio context blocked
+  }
 }
 
 export function computeMaterialSummary(fen: string): {

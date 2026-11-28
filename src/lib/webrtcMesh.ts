@@ -66,6 +66,27 @@ export interface WebRTCMeshOptions {
   initialCameraOn?: boolean;
 }
 
+export function optimizeAudioSdp(sdp: string): string {
+  // Prioritize clear Opus voice (FEC + 64kbps mono) over unstable low-bitrate defaults
+  return sdp.replace(
+    /a=fmtp:(\d+)\s+([^\r\n]+)/g,
+    (_full, pt: string, params: string) => {
+      if (!params.includes('minptime') && !params.includes('useinbandfec') && pt !== '111') {
+        return `a=fmtp:${pt} ${params}`;
+      }
+      const next = new Set(params.split(';').map((s) => s.trim()).filter(Boolean));
+      const clean = Array.from(next).filter(
+        (p) =>
+          !p.startsWith('maxaveragebitrate=') &&
+          !p.startsWith('useinbandfec=') &&
+          !p.startsWith('stereo=')
+      );
+      clean.push('useinbandfec=1', 'stereo=0', 'maxaveragebitrate=64000');
+      return `a=fmtp:${pt} ${clean.join(';')}`;
+    }
+  );
+}
+
 export function createBlankVideoTrack(): MediaStreamTrack | null {
   if (typeof document === 'undefined') return null;
   try {
@@ -108,6 +129,8 @@ export class WebRTCMeshRoom {
   public myPeerId = '';
   private activeCalls: Map<string, MediaConnection> = new Map();
   private remoteAudioElements: Map<string, HTMLAudioElement> = new Map();
+  private remoteSpeakerVolume = 1;
+  private remoteSpeakerMuted = false;
 
   // Signaling transports: Durable Object WebSocket -> BroadcastChannel / Supabase fallback
   private ws: WebSocket | null = null;
@@ -146,10 +169,15 @@ export class WebRTCMeshRoom {
     initialSeat: number | undefined = 1
   ): Promise<string> {
     this.localStream = stream;
-    if (this.enableVideoSlot && stream.getVideoTracks().length === 0) {
-      this.blankVideoTrack = createBlankVideoTrack();
-      if (this.blankVideoTrack) {
-        this.localStream.addTrack(this.blankVideoTrack);
+    if (this.enableVideoSlot) {
+      if (stream.getVideoTracks().length > 0) {
+        this.myCameraOn = true;
+      } else {
+        this.blankVideoTrack = createBlankVideoTrack();
+        if (this.blankVideoTrack) {
+          this.localStream.addTrack(this.blankVideoTrack);
+        }
+        this.myCameraOn = false;
       }
     }
 
@@ -168,6 +196,7 @@ export class WebRTCMeshRoom {
           debug: 1,
           config: {
             iceServers: [
+              { urls: 'stun:stun.cloudflare.com:3478' },
               { urls: 'stun:stun.l.google.com:19302' },
               { urls: 'stun:stun1.l.google.com:19302' },
               { urls: 'stun:stun2.l.google.com:19302' },
@@ -215,7 +244,7 @@ export class WebRTCMeshRoom {
 
         this.peer.on('call', (call) => {
           if (!this.localStream || this.isDestroyed) return;
-          call.answer(this.localStream);
+          call.answer(this.localStream, { sdpTransform: optimizeAudioSdp });
           this.setupCall(call);
         });
       } catch (err) {
@@ -390,6 +419,8 @@ export class WebRTCMeshRoom {
       }
       const audioTracks = remoteStream.getAudioTracks();
       audioEl.srcObject = audioTracks.length > 0 ? new MediaStream(audioTracks) : remoteStream;
+      audioEl.volume = this.remoteSpeakerVolume;
+      audioEl.muted = this.remoteSpeakerMuted;
       audioEl.play().catch(() => {});
 
       const mappedUserId = this.knownPeers.get(call.peer)?.userId;
@@ -417,13 +448,29 @@ export class WebRTCMeshRoom {
       return;
     }
     try {
-      const call = this.peer.call(targetPeerId, this.localStream);
+      const call = this.peer.call(targetPeerId, this.localStream, {
+        sdpTransform: optimizeAudioSdp,
+      });
       if (call) {
         this.setupCall(call);
       }
     } catch (err) {
       console.warn('Failed to call peer:', targetPeerId, err);
     }
+  }
+
+  public setRemoteSpeakerMuted(muted: boolean) {
+    this.remoteSpeakerMuted = muted;
+    this.remoteAudioElements.forEach((audioEl) => {
+      audioEl.muted = muted;
+    });
+  }
+
+  public setRemoteSpeakerVolume(volume: number) {
+    this.remoteSpeakerVolume = Math.max(0, Math.min(1, volume));
+    this.remoteAudioElements.forEach((audioEl) => {
+      audioEl.volume = this.remoteSpeakerVolume;
+    });
   }
 
   public updateLocalStream(newStream: MediaStream) {

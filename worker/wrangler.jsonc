@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/wrangler/config-schema.json",
-  "name": "friendsclub-realtime",
+  "name": "chesschat-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-11-27",
   "compatibility_flags": ["nodejs_compat"],
@@ -16,13 +16,13 @@
     }
   },
   "vars": {
-    "ALLOWED_ORIGIN": "https://friendsclub.tools4genz.com"
+    "ALLOWED_ORIGIN": "https://chesschat.tools4genz.com"
   },
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "friendsclub-db",
-      "database_id": "00000000-0000-0000-0000-000000000000"
+      "database_name": "chesschat-db",
+      "database_id": "fb32bc0f-6629-439f-9f46-152ddb56f116"
     }
   ],
   "durable_objects": {

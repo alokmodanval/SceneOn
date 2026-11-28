@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Header } from './components/Header';
-import { Hero } from './components/Hero';
 import { LiveVoiceRooms } from './components/LiveVoiceRooms';
 import { SceneBoard } from './components/SceneBoard';
 import { OnboardingModal } from './components/OnboardingModal';
@@ -11,21 +10,40 @@ import { OneOnOneChatModal } from './components/OneOnOneChatModal';
 import { VoiceRoomActive } from './components/VoiceRoomActive';
 import { ViralMatchBanner } from './components/ViralMatchBanner';
 import { SpeedDateModal } from './components/SpeedDateModal';
-import { ChessArena } from './components/ChessArena';
-import { SceneRoom, SceneUser } from './types';
-import { getCurrentUser, isFreshWithin24Hours, saveCurrentUser } from './lib/identity';
+import { ChessArena, ExternalChallengeRequest } from './components/ChessArena';
 import {
+  ChessHistoryRecord,
+  FriendsDataPayload,
+  NotificationItem,
+  SceneRoom,
+  SceneUser,
+} from './types';
+import {
+  clearCurrentUser,
+  getCurrentUser,
+  isFreshWithin24Hours,
+  saveCurrentUser,
+} from './lib/identity';
+import {
+  fetchChessHistory,
+  fetchFriendsData,
+  fetchNotifications,
   fetchSceneRooms,
   fetchSceneUsers,
   getSceneUserById,
   isSupabaseConfigured,
+  markNotificationsRead,
+  removeFriend,
+  respondToFriendRequest,
+  sendFriendRequest,
   upsertSceneRoom,
   upsertSceneUser,
 } from './lib/supabase';
 import { lobbySocket } from './lib/lobbySocket';
 import { buildApiUrl } from './lib/backendConfig';
-import { Radio, Sparkles, Share2, Heart, Crown } from 'lucide-react';
+import { playChessSound } from './lib/chessHelpers';
 import { playUiSound } from './lib/audioEngine';
+import { Crown, Heart, Radio, Share2, Sparkles, Swords, X } from 'lucide-react';
 
 export function App() {
   const [currentUser, setCurrentUser] = useState<SceneUser | null>(() => getCurrentUser());
@@ -34,91 +52,127 @@ export function App() {
     currentUserRef.current = currentUser;
   }, [currentUser]);
 
-  const [activeTab, setActiveTab] = useState<'voice' | 'matches' | 'chess'>('voice');
+  // Default Landing Tab = ChessChat Arena (first page opens directly onto the Chessboard + Signup/Friends)
+  const [activeTab, setActiveTab] = useState<'chess' | 'voice' | 'matches'>('chess');
   const [rooms, setRooms] = useState<SceneRoom[]>([]);
   const [peers, setPeers] = useState<SceneUser[]>([]);
   const [activeRoom, setActiveRoom] = useState<SceneRoom | null>(null);
   const [chatTargetUser, setChatTargetUser] = useState<SceneUser | null>(null);
+
   const [initialChessGameId, setInitialChessGameId] = useState<string | null>(null);
   const [initialChessTimeMs, setInitialChessTimeMs] = useState<number>(300000);
+  const [externalChallengeRequest, setExternalChallengeRequest] =
+    useState<ExternalChallengeRequest | null>(null);
+
   const [lobbyOnlineCount, setLobbyOnlineCount] = useState<number>(0);
+  const [onlineUserIds, setOnlineUserIds] = useState<string[]>([]);
   const [isD1Connected, setIsD1Connected] = useState<boolean>(false);
+
+  // Friends, Match History & Live Notifications State
+  const [friendsData, setFriendsData] = useState<FriendsDataPayload>({
+    friends: [],
+    incomingRequests: [],
+    outgoingRequests: [],
+  });
+  const [chessHistory, setChessHistory] = useState<ChessHistoryRecord[]>([]);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [liveToast, setLiveToast] = useState<NotificationItem | null>(null);
 
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [isRestoreOpen, setIsRestoreOpen] = useState(false);
   const [isStoryCardOpen, setIsStoryCardOpen] = useState(false);
   const [isHostModalOpen, setIsHostModalOpen] = useState(false);
   const [isSpeedDateOpen, setIsSpeedDateOpen] = useState(false);
-  const [pendingAction, setPendingAction] = useState<'speed_date' | 'host_room' | 'chess_invite' | null>(null);
+  const [pendingAction, setPendingAction] = useState<
+    'speed_date' | 'host_room' | 'chess_invite' | null
+  >(null);
   const [inviterUser, setInviterUser] = useState<SceneUser | null>(null);
 
-  const loadData = useCallback(async (checkDeepLinks = false) => {
-    const [fetchedRooms, fetchedUsers] = await Promise.all([
-      fetchSceneRooms(currentUserRef.current?.id),
-      fetchSceneUsers(),
+  const refreshSocialData = useCallback(async () => {
+    const uid = currentUserRef.current?.id;
+    if (!uid) {
+      const localHist = await fetchChessHistory('');
+      setChessHistory(localHist);
+      return;
+    }
+    const [friends, notifs, hist] = await Promise.all([
+      fetchFriendsData(uid),
+      fetchNotifications(uid),
+      fetchChessHistory(uid),
     ]);
-    setRooms(fetchedRooms);
-    setPeers(fetchedUsers);
-
-    if (!checkDeepLinks) return;
-
-    const params = new URLSearchParams(window.location.search);
-    const chessParam = params.get('chess');
-    if (chessParam) {
-      const tc = Number(params.get('tc')) || 300000;
-      setInitialChessGameId(chessParam);
-      setInitialChessTimeMs(tc);
-      setActiveTab('chess');
-      if (!getCurrentUser()) {
-        setPendingAction('chess_invite');
-        setIsOnboardingOpen(true);
-      }
-    }
-
-    const matchUserId = params.get('match');
-    if (matchUserId) {
-      const found = fetchedUsers.find(
-        (u) => u.id === matchUserId || u.id.startsWith(matchUserId)
-      );
-      if (found) {
-        setInviterUser(found);
-      } else {
-        getSceneUserById(matchUserId).then((u) => {
-          if (u) setInviterUser(u);
-        });
-      }
-    }
-
-    const targetRoomId = params.get('room');
-    if (targetRoomId) {
-      let targetRoom = fetchedRooms.find((r) => r.id === targetRoomId);
-      const pinParam = params.get('pin');
-      if (!targetRoom) {
-        targetRoom = {
-          id: targetRoomId,
-          title: '🎙️ Live Voice Pod',
-          vibe_tag: '☕ Chai & Bakchodi',
-          participants: [],
-          max_users: 6,
-          active_topic: 'Aaj ka scene kya hai? Hop on mic!',
-          kick_votes: {},
-          created_at: new Date().toISOString(),
-          is_private: Boolean(pinParam),
-          room_pin: pinParam || undefined,
-        };
-        setRooms((prev) => [targetRoom!, ...prev]);
-      }
-
-      if (!targetRoom.is_private || targetRoom.room_pin === pinParam) {
-        setActiveRoom(targetRoom);
-        if (!getCurrentUser()) {
-          setIsOnboardingOpen(true);
-        }
-      } else {
-        setActiveTab('voice');
-      }
-    }
+    setFriendsData(friends);
+    setNotifications(notifs);
+    setChessHistory(hist);
   }, []);
+
+  const loadData = useCallback(
+    async (checkDeepLinks = false) => {
+      const [fetchedRooms, fetchedUsers] = await Promise.all([
+        fetchSceneRooms(currentUserRef.current?.id),
+        fetchSceneUsers(),
+      ]);
+      setRooms(fetchedRooms);
+      setPeers(fetchedUsers);
+      await refreshSocialData();
+
+      if (!checkDeepLinks) return;
+
+      const params = new URLSearchParams(window.location.search);
+      const chessParam = params.get('chess');
+      if (chessParam) {
+        const tc = Number(params.get('tc')) || 300000;
+        setInitialChessGameId(chessParam);
+        setInitialChessTimeMs(tc);
+        setActiveTab('chess');
+      }
+
+      const matchUserId = params.get('match');
+      if (matchUserId) {
+        const found = fetchedUsers.find(
+          (u) => u.id === matchUserId || u.id.startsWith(matchUserId)
+        );
+        if (found) {
+          setInviterUser(found);
+        } else {
+          getSceneUserById(matchUserId).then((u) => {
+            if (u) setInviterUser(u);
+          });
+        }
+      }
+
+      const targetRoomId = params.get('room');
+      if (targetRoomId) {
+        let targetRoom = fetchedRooms.find((r) => r.id === targetRoomId);
+        const pinParam = params.get('pin');
+        if (!targetRoom) {
+          targetRoom = {
+            id: targetRoomId,
+            title: '🎙️ Live Voice Pod',
+            vibe_tag: '☕ Chai & Bakchodi',
+            participants: [],
+            max_users: 6,
+            active_topic: 'Aaj ka scene kya hai? Hop on mic!',
+            kick_votes: {},
+            created_at: new Date().toISOString(),
+            is_private: Boolean(pinParam),
+            room_pin: pinParam || undefined,
+          };
+          setRooms((prev) => [targetRoom!, ...prev]);
+        }
+
+        if (!targetRoom.is_private || targetRoom.room_pin === pinParam) {
+          setActiveTab('voice');
+          setActiveRoom(targetRoom);
+          if (!getCurrentUser()) {
+            setIsOnboardingOpen(true);
+          }
+        } else {
+          setActiveTab('voice');
+        }
+      }
+    },
+    [refreshSocialData]
+  );
 
   useEffect(() => {
     let active = true;
@@ -128,7 +182,7 @@ export function App() {
 
     const handleAuthChange = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail?.user) {
+      if (detail && 'user' in detail) {
         setCurrentUser(detail.user);
       }
     };
@@ -153,32 +207,51 @@ export function App() {
     };
   }, [loadData]);
 
-  // Connect Cloudflare Durable Object LobbyHub for real-time presence & global queues
+  // Connect Cloudflare Durable Object LobbyHub for real-time presence, online blue ticks & live notifications
   useEffect(() => {
     fetch(buildApiUrl('/api/health'))
-      .then((res) => (res.ok && (res.headers.get('content-type') || '').includes('json') ? res.json() : null))
+      .then((res) =>
+        res.ok && (res.headers.get('content-type') || '').includes('json') ? res.json() : null
+      )
       .then((data: { ok?: boolean } | null) => {
         if (data?.ok) setIsD1Connected(true);
       })
       .catch(() => {});
 
     const presenceId = currentUser?.id || `guest_${Math.random().toString(36).slice(2, 8)}`;
-    const presenceAlias = currentUser?.alias || 'BrowserGuest';
+    const presenceAlias = currentUser?.alias || 'ChessGuest';
     lobbySocket.connect(presenceId, presenceAlias);
 
     const unsub = lobbySocket.subscribe((event) => {
-      if (event.type === 'presence_update') {
-        setLobbyOnlineCount(event.onlineCount);
+      if (event.type === 'presence_update' || event.type === 'pong') {
+        if (typeof event.onlineCount === 'number') setLobbyOnlineCount(event.onlineCount);
+        if (Array.isArray(event.onlineUserIds)) setOnlineUserIds(event.onlineUserIds);
         setIsD1Connected(true);
+      }
+      if (event.type === 'notification') {
+        playChessSound('notify');
+        setNotifications((prev) =>
+          prev.some((n) => n.id === event.notification.id)
+            ? prev
+            : [event.notification, ...prev]
+        );
+        setLiveToast(event.notification);
+        window.setTimeout(() => {
+          setLiveToast((curr) => (curr?.id === event.notification.id ? null : curr));
+        }, 12000);
+        void refreshSocialData();
+      }
+      if (event.type === 'friends_updated' || event.type === 'history_updated') {
+        void refreshSocialData();
       }
     });
 
     return () => {
       unsub();
     };
-  }, [currentUser?.id, currentUser?.alias]);
+  }, [currentUser?.id, currentUser?.alias, refreshSocialData]);
 
-  // Update online presence quietly every 60s without causing modal re-renders
+  // Update online presence quietly every 60s
   useEffect(() => {
     const interval = setInterval(() => {
       const user = currentUserRef.current;
@@ -250,7 +323,66 @@ export function App() {
     setActiveRoom(null);
   };
 
-  const activePeersCount = peers.filter((p) => p.is_online && isFreshWithin24Hours(p.last_seen)).length;
+  // Friend & Notification Handlers
+  const handleSendFriendRequestAction = async (target: {
+    toUserId?: string;
+    toUsername?: string;
+  }): Promise<string> => {
+    if (!currentUser) {
+      setIsOnboardingOpen(true);
+      return 'Create a profile first to send friend requests!';
+    }
+    const res = await sendFriendRequest({
+      fromUserId: currentUser.id,
+      toUserId: target.toUserId,
+      toUsername: target.toUsername,
+    });
+    await refreshSocialData();
+    if (res.alreadyFriends) return 'You are already ChessChat friends!';
+    if (res.ok && res.status === 'accepted') return 'Friend request accepted!';
+    if (res.ok) return 'Friend request notification sent!';
+    return res.error || 'Could not send friend request.';
+  };
+
+  const handleRespondFriendRequestAction = async (
+    requesterId: string,
+    action: 'accept' | 'decline'
+  ) => {
+    if (!currentUser) return;
+    await respondToFriendRequest(currentUser.id, requesterId, action);
+    await refreshSocialData();
+  };
+
+  const handleRemoveFriendAction = async (friendId: string) => {
+    if (!currentUser) return;
+    await removeFriend(currentUser.id, friendId);
+    await refreshSocialData();
+  };
+
+  const handleAcceptChessInvite = (notif: NotificationItem) => {
+    if (!currentUser || !notif.payload?.gameId) return;
+    playUiSound('unlock');
+    setLiveToast(null);
+    void markNotificationsRead(currentUser.id, notif.id).then(() => refreshSocialData());
+    setActiveTab('chess');
+    setActiveRoom(null);
+    setExternalChallengeRequest({
+      launchKey: `${notif.id}_${Date.now()}`,
+      gameId: notif.payload.gameId,
+      timeControlMs: notif.payload.timeControlMs || 300000,
+      preferredColor: 'b',
+      opponent: {
+        id: notif.from_user_id,
+        alias: notif.from_alias,
+        username: notif.from_username,
+        avatar: notif.from_avatar,
+      },
+    });
+  };
+
+  const activePeersCount = peers.filter(
+    (p) => p.is_online && isFreshWithin24Hours(p.last_seen)
+  ).length;
   const onlineCount = Math.max(activePeersCount + (currentUser ? 1 : 0), lobbyOnlineCount);
 
   return (
@@ -267,9 +399,10 @@ export function App() {
       <Header
         currentUser={currentUser}
         onlineCount={onlineCount}
+        onlineUserIds={onlineUserIds}
+        notifications={notifications}
         onOpenOnboarding={() => setIsOnboardingOpen(true)}
         onOpenRestore={() => setIsRestoreOpen(true)}
-        onOpenStoryCard={() => setIsStoryCardOpen(true)}
         onOpenSpeedDate={() => {
           if (!currentUser) {
             setPendingAction('speed_date');
@@ -278,9 +411,89 @@ export function App() {
             setIsSpeedDateOpen(true);
           }
         }}
+        onAcceptChessInvite={handleAcceptChessInvite}
+        onRespondFriendRequest={(notif, action) => {
+          const reqId = notif.payload?.requesterId || notif.from_user_id;
+          void handleRespondFriendRequestAction(reqId, action);
+        }}
+        onMarkNotificationsRead={(id) => {
+          if (!currentUser) return;
+          void markNotificationsRead(currentUser.id, id).then(() => refreshSocialData());
+        }}
+        onGoHome={() => {
+          setActiveRoom(null);
+          setActiveTab('chess');
+        }}
       />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 pb-28 sm:pb-12">
+      {/* Live Incoming Challenge / Friend Request Floating Toast */}
+      {liveToast && (
+        <div className="fixed top-16 right-3 sm:right-6 z-50 w-[calc(100%-24px)] sm:w-88 bg-[#111116] border-2 border-[#CCFF00] rounded-2xl p-3.5 shadow-neo animate-fadeIn space-y-2.5">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <div
+                className={`w-9 h-9 rounded-full bg-gradient-to-tr ${
+                  liveToast.from_avatar?.bg || 'from-violet-600 to-indigo-900'
+                } flex items-center justify-center text-base flex-shrink-0`}
+              >
+                {liveToast.from_avatar?.emoji || '♟️'}
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-heading font-black text-white truncate">
+                  {liveToast.title}
+                </p>
+                <p className="text-[11px] text-white/70 leading-snug">{liveToast.body}</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setLiveToast(null)}
+              aria-label="Close notification popup"
+              className="p-1 rounded-lg text-white/50 hover:text-white"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {liveToast.type === 'chess_invite' && liveToast.payload?.gameId && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => handleAcceptChessInvite(liveToast)}
+                className="flex-1 py-2 px-3 rounded-xl bg-[#CCFF00] text-black font-heading font-black text-xs flex items-center justify-center gap-1.5"
+              >
+                <Swords className="w-3.5 h-3.5" />
+                <span>Accept &amp; Play (Camera Check)</span>
+              </button>
+            </div>
+          )}
+
+          {liveToast.type === 'friend_request' && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const reqId = liveToast.payload?.requesterId || liveToast.from_user_id;
+                  setLiveToast(null);
+                  void handleRespondFriendRequestAction(reqId, 'accept');
+                }}
+                className="flex-1 py-1.5 rounded-xl bg-[#1D9BF0] text-white font-heading font-bold text-xs"
+              >
+                Accept Friend
+              </button>
+              <button
+                type="button"
+                onClick={() => setLiveToast(null)}
+                className="px-3 py-1.5 rounded-xl bg-white/5 text-white/70 text-xs font-mono"
+              >
+                Later
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6 pb-28 sm:pb-12">
         {activeRoom && currentUser ? (
           <VoiceRoomActive
             room={activeRoom}
@@ -294,22 +507,28 @@ export function App() {
           />
         ) : (
           <>
-            <Hero
-              currentUser={currentUser}
-              onOpenOnboarding={() => setIsOnboardingOpen(true)}
-              onSelectTab={(tab) => setActiveTab(tab)}
-              onOpenSpeedDate={() => {
-                if (!currentUser) {
-                  setPendingAction('speed_date');
-                  setIsOnboardingOpen(true);
-                } else {
-                  setIsSpeedDateOpen(true);
-                }
-              }}
-            />
-
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 mb-8 pt-4">
+            {/* Navigation Tabs with ChessChat First */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 mb-5">
               <div className="grid grid-cols-3 sm:flex items-center w-full lg:w-auto gap-1 sm:gap-2">
+                <button
+                  onClick={() => {
+                    playUiSound('click');
+                    setActiveTab('chess');
+                  }}
+                  className={`px-1.5 sm:px-4 lg:px-5 py-3 font-heading font-black text-xs sm:text-sm lg:text-base flex items-center justify-center sm:justify-start gap-1 sm:gap-2 border-b-2 transition-all whitespace-nowrap ${
+                    activeTab === 'chess'
+                      ? 'border-[#CCFF00] text-[#CCFF00]'
+                      : 'border-transparent text-white/50 hover:text-white'
+                  }`}
+                >
+                  <Crown className="w-4 h-4 flex-shrink-0" />
+                  <span className="sm:hidden">Chess</span>
+                  <span className="hidden sm:inline">ChessChat Arena</span>
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300">
+                    CAM
+                  </span>
+                </button>
+
                 <button
                   onClick={() => {
                     playUiSound('click');
@@ -323,7 +542,7 @@ export function App() {
                 >
                   <Radio className="w-4 h-4 flex-shrink-0" />
                   <span className="sm:hidden">Voice</span>
-                  <span className="hidden sm:inline">Live Voice Scenes</span>
+                  <span className="hidden sm:inline">Live Voice Pods</span>
                   <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-[#CCFF00]/15 text-[#CCFF00]">
                     {rooms.length}
                   </span>
@@ -341,29 +560,10 @@ export function App() {
                   }`}
                 >
                   <Sparkles className="w-4 h-4 flex-shrink-0" />
-                  <span className="sm:hidden">Matches</span>
-                  <span className="hidden sm:inline">Scene Matches</span>
+                  <span className="sm:hidden">Players</span>
+                  <span className="hidden sm:inline">Find Players</span>
                   <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-300">
                     24h
-                  </span>
-                </button>
-
-                <button
-                  onClick={() => {
-                    playUiSound('click');
-                    setActiveTab('chess');
-                  }}
-                  className={`px-1.5 sm:px-3.5 lg:px-5 py-3 font-heading font-black text-xs sm:text-sm lg:text-base flex items-center justify-center sm:justify-start gap-1 sm:gap-2 border-b-2 transition-all whitespace-nowrap ${
-                    activeTab === 'chess'
-                      ? 'border-cyan-400 text-cyan-300'
-                      : 'border-transparent text-white/50 hover:text-white'
-                  }`}
-                >
-                  <Crown className="w-4 h-4 flex-shrink-0" />
-                  <span className="sm:hidden">Chess</span>
-                  <span className="hidden sm:inline">Chess + Video</span>
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300">
-                    LIVE
                   </span>
                 </button>
               </div>
@@ -380,7 +580,37 @@ export function App() {
               </div>
             </div>
 
-            {activeTab === 'voice' ? (
+            {activeTab === 'chess' ? (
+              <ChessArena
+                key={initialChessGameId || 'chess'}
+                currentUser={currentUser}
+                onlineUserIds={onlineUserIds}
+                friendsData={friendsData}
+                history={chessHistory}
+                initialGameId={initialChessGameId}
+                initialTimeControlMs={initialChessTimeMs}
+                externalChallengeRequest={externalChallengeRequest}
+                onClearExternalChallenge={() => setExternalChallengeRequest(null)}
+                onClearInitialGame={() => setInitialChessGameId(null)}
+                onQuickUserCreated={(u) => {
+                  setCurrentUser(u);
+                  void refreshSocialData();
+                }}
+                onOpenRestore={() => setIsRestoreOpen(true)}
+                onSignOut={() => {
+                  clearCurrentUser();
+                  lobbySocket.disconnect();
+                  setCurrentUser(null);
+                  setFriendsData({ friends: [], incomingRequests: [], outgoingRequests: [] });
+                  setNotifications([]);
+                }}
+                onSendFriendRequest={handleSendFriendRequestAction}
+                onRespondFriendRequest={handleRespondFriendRequestAction}
+                onRemoveFriend={handleRemoveFriendAction}
+                onOpenChat={(u) => setChatTargetUser(u)}
+                onRefreshSocialData={refreshSocialData}
+              />
+            ) : activeTab === 'voice' ? (
               <LiveVoiceRooms
                 rooms={rooms}
                 currentUser={currentUser}
@@ -391,33 +621,34 @@ export function App() {
                   setIsOnboardingOpen(true);
                 }}
               />
-            ) : activeTab === 'matches' ? (
+            ) : (
               <SceneBoard
                 peers={peers}
                 currentUser={currentUser}
                 onOpenChat={(peer) => setChatTargetUser(peer)}
                 onOpenOnboarding={() => setIsOnboardingOpen(true)}
               />
-            ) : (
-              <ChessArena
-                key={`${initialChessGameId || 'lobby'}_${currentUser ? currentUser.id : 'anon'}`}
-                currentUser={currentUser}
-                initialGameId={initialChessGameId}
-                initialTimeControlMs={initialChessTimeMs}
-                onOpenOnboarding={() => {
-                  setPendingAction('chess_invite');
-                  setIsOnboardingOpen(true);
-                }}
-                onClearInitialGame={() => setInitialChessGameId(null)}
-              />
             )}
           </>
         )}
       </main>
 
-      {/* Mobile Bottom Bar Navigation (hidden inside active voice room so controls stay unobstructed) */}
+      {/* Mobile Bottom Bar Navigation */}
       {!(activeRoom && currentUser) && (
         <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#070709]/95 backdrop-blur-lg border-t border-white/10 px-2 py-2 flex items-center justify-around">
+          <button
+            onClick={() => {
+              playUiSound('click');
+              setActiveTab('chess');
+            }}
+            className={`flex flex-col items-center gap-0.5 text-[10px] font-mono ${
+              activeTab === 'chess' ? 'text-[#CCFF00] font-bold' : 'text-white/60'
+            }`}
+          >
+            <Crown className="w-4 h-4" />
+            <span>Chess</span>
+          </button>
+
           <button
             onClick={() => {
               playUiSound('click');
@@ -441,20 +672,7 @@ export function App() {
             }`}
           >
             <Sparkles className="w-4 h-4" />
-            <span>Matches</span>
-          </button>
-
-          <button
-            onClick={() => {
-              playUiSound('click');
-              setActiveTab('chess');
-            }}
-            className={`flex flex-col items-center gap-0.5 text-[10px] font-mono ${
-              activeTab === 'chess' ? 'text-cyan-300 font-bold' : 'text-white/60'
-            }`}
-          >
-            <Crown className="w-4 h-4" />
-            <span>Chess</span>
+            <span>Players</span>
           </button>
 
           <button
@@ -467,9 +685,9 @@ export function App() {
                 setIsSpeedDateOpen(true);
               }
             }}
-            className="flex flex-col items-center gap-0.5 text-[10px] font-mono text-[#CCFF00] font-bold"
+            className="flex flex-col items-center gap-0.5 text-[10px] font-mono text-pink-300 font-bold"
           >
-            <Heart className="w-4 h-4 fill-[#CCFF00] animate-bounce" />
+            <Heart className="w-4 h-4 fill-pink-500" />
             <span>Date</span>
           </button>
 
@@ -493,7 +711,7 @@ export function App() {
               className="flex flex-col items-center gap-0.5 text-[10px] font-mono text-[#CCFF00] font-bold"
             >
               <Sparkles className="w-4 h-4 fill-[#CCFF00]" />
-              <span>Set</span>
+              <span>Join</span>
             </button>
           )}
         </nav>
@@ -503,7 +721,7 @@ export function App() {
       <footer className="border-t border-white/10 bg-[#070709] pt-8 pb-24 sm:pb-8 text-center text-xs font-mono text-white/50">
         <div className="max-w-7xl mx-auto px-4 space-y-2">
           <p className="text-white/80 font-bold">
-            FriendsClub by{' '}
+            ChessChat by{' '}
             <a
               href="https://tools4genz.com"
               target="_blank"
@@ -512,10 +730,10 @@ export function App() {
             >
               Tools4Genz
             </a>{' '}
-            • friendsclub.tools4genz.com
+            • chesschat.tools4genz.com
           </p>
           <p className="text-white/40">
-            100% Free Forever • Zero-Login Architecture • WebRTC Audio Mesh • Web Audio API Voice Filters
+            100% Free Forever • Zero-Login Live Chess • HD WebRTC Voice &amp; Video • Friends &amp; Match History
           </p>
         </div>
       </footer>
@@ -532,6 +750,7 @@ export function App() {
             setCurrentUser(user);
             saveCurrentUser(user);
             setIsOnboardingOpen(false);
+            void refreshSocialData();
             if (pendingAction === 'speed_date') {
               setPendingAction(null);
               setIsSpeedDateOpen(true);
@@ -553,6 +772,7 @@ export function App() {
           onUserRestored={(user) => {
             setCurrentUser(user);
             setIsRestoreOpen(false);
+            void refreshSocialData();
           }}
         />
       )}
